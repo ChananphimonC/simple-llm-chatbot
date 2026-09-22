@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  overscroll-behavior: none;
+  background: radial-gradient(ellipse at top, #e8f6ff 0%, #f3ebff 45%, #faf8ff 100%);
+  background-attachment: fixed;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  color: #191b24;
+}
+
+::-webkit-scrollbar {
+  display: none;
+}
+
+/* Markdown replies: give real structured content (numbered steps, callouts)
+   the glass-pill treatment from DESIGN.md instead of default prose styling. */
+.md-content ol {
+  list-style: none;
+  margin: 0.875rem 0;
+  padding: 0;
+  counter-reset: md-step;
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.md-content ol > li {
+  counter-increment: md-step;
+  position: relative;
+  padding: 0.75rem 1rem 0.75rem 2.75rem;
+  background: rgba(237, 237, 250, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 1rem;
+  margin: 0;
+}
+
+.md-content ol > li::before {
+  content: counter(md-step);
+  position: absolute;
+  left: 0.75rem;
+  top: 0.75rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 9999px;
+  background: #e7deff;
+  color: #663ed5;
+  font-weight: 700;
+  font-size: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.md-content blockquote {
+  margin: 0.875rem 0;
+  padding: 0.875rem 1rem;
+  background: #e7e7f4cc;
+  border: 1px solid #e7deff;
+  border-left: none;
+  border-radius: 1rem;
+  font-style: normal;
+  color: #191b24;
+}
+
+.md-content blockquote p {
+  margin: 0;
+}
