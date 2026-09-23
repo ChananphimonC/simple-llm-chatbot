@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
-from google.genai.errors import ClientError
+from google.genai.errors import APIError, ClientError
 from dotenv import load_dotenv
 import os
 
@@ -43,6 +43,11 @@ def chat(req: ChatRequest):
                 detail="ใช้โควต้า Gemini ฟรีของวันนี้หมดแล้ว ลองใหม่พรุ่งนี้ หรืออัปเกรดแพลนใน Google AI Studio",
             )
         raise HTTPException(status_code=502, detail=f"Gemini API error: {e.message}")
+    except APIError as e:
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini เซิร์ฟเวอร์ไม่ว่างชั่วคราว ลองใหม่อีกครั้ง",
+        )
     return {"reply": response.text}
 
 @app.get("/")

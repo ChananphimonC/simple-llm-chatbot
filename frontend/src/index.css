@@ -16,8 +16,63 @@ body {
   color: #191b24;
 }
 
-::-webkit-scrollbar {
+::selection {
+  background: rgba(102, 62, 213, 0.22);
+  color: #191b24;
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
   display: none;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+  50% {
+    transform: scale(1.08);
+    filter: brightness(1.12);
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.message-in {
+  animation: message-rise 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes message-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-in,
+  .animate-\[breathe_2\.4s_ease-in-out_infinite\] {
+    animation: none;
+  }
 }
 
 /* Markdown replies: give real structured content (numbered steps, callouts)
