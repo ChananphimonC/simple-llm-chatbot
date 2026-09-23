@@ -1,0 +1,23 @@
+# backend
+backend/venv/
+backend/__pycache__/
+backend/.env
+backend/*.log
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/*.log
+
+# editor / agent tool config (not part of the app)
+.agents/
+.claude/
+.cursor/
+.windsurf/
+.codex/
+.amazonq/
+.impeccable/
+
+# misc
+.DS_Store
