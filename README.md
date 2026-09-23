@@ -10,11 +10,7 @@ Frontend (React + Vite) → Backend (FastAPI) → Gemini API
 
 Voice output in action — Lumina reads its own replies out loud, switching voice between Thai and English mid-sentence:
 
-<video src="docs/demo.mp4" controls width="600">
-  Your browser doesn't support inline video — download it directly: <a href="docs/demo.mp4">docs/demo.mp4</a>
-</video>
-
-(If the video above doesn't render on GitHub, open [`docs/demo.mp4`](docs/demo.mp4) directly.)
+![Lumina AI demo: chatting and voice output](docs/demo.gif)
 
 ## What it does
 
