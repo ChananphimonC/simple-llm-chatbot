@@ -1,6 +1,10 @@
 import { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { speak, stopSpeaking, speechSupported } from './speech';
+import LoginModal from './LoginModal';
+
+const TOKEN_KEY = 'lumina_token';
+const CONVERSATION_KEY = 'lumina_conversation_id';
 
 const SUGGESTIONS = [
   'สรุปบทความยาวๆ ให้อ่านง่าย',
@@ -54,6 +58,16 @@ function AlertIcon() {
       <path d="M12 9v4" />
       <path d="M10.3 3.9 1.9 18.5A1.5 1.5 0 0 0 3.2 21h17.6a1.5 1.5 0 0 0 1.3-2.5L13.7 3.9a1.5 1.5 0 0 0-3.4 0Z" />
       <path d="M12 17h.01" />
+    </svg>
+  );
+}
+
+function LogoutIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <path d="M16 17l5-5-5-5" />
+      <path d="M21 12H9" />
     </svg>
   );
 }
@@ -135,6 +149,9 @@ function MessageRow({ role, text, speaking, onToggleSpeak }) {
 }
 
 function App() {
+  const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY));
+  const [conversationId, setConversationId] = useState(() => localStorage.getItem(CONVERSATION_KEY));
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -143,6 +160,69 @@ function App() {
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
   const lastAutoSpokenRef = useRef(-1);
+
+  const apiUrl = import.meta.env.VITE_API_URL;
+
+  const signOut = () => {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(CONVERSATION_KEY);
+    setToken(null);
+    setConversationId(null);
+    setMessages([]);
+  };
+
+  const handleAuthenticated = async (newToken) => {
+    localStorage.setItem(TOKEN_KEY, newToken);
+    setToken(newToken);
+
+    try {
+      const res = await fetch(`${apiUrl}/conversations`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${newToken}` },
+      });
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      localStorage.setItem(CONVERSATION_KEY, String(data.conversation_id));
+      setConversationId(String(data.conversation_id));
+    } catch {
+      setMessages([{ role: 'error', text: 'เข้าสู่ระบบสำเร็จ แต่เปิดห้องแชทใหม่ไม่ได้ ลองรีเฟรชหน้านี้' }]);
+    }
+  };
+
+  // Resume a known conversation's history on load (survives refresh) instead
+  // of starting blank every time the token is still valid.
+  useEffect(() => {
+    if (!token || !conversationId) return;
+    let cancelled = false;
+
+    setHistoryLoading(true);
+    fetch(`${apiUrl}/conversations/${conversationId}/messages`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((res) => {
+        if (res.status === 401) {
+          signOut();
+          return null;
+        }
+        if (!res.ok) throw new Error();
+        return res.json();
+      })
+      .then((history) => {
+        if (cancelled || !history) return;
+        setMessages(history.map((m) => ({ role: m.role === 'user' ? 'user' : 'bot', text: m.content })));
+      })
+      .catch(() => {
+        if (!cancelled) setMessages([{ role: 'error', text: 'โหลดประวัติบทสนทนาไม่สำเร็จ' }]);
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, conversationId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -195,18 +275,25 @@ function App() {
 
   const send = async (text) => {
     const message = text.trim();
-    if (!message || loading) return;
+    if (!message || loading || !token || !conversationId) return;
 
     setMessages((prev) => [...prev, { role: 'user', text: message }]);
     setInput('');
     setLoading(true);
 
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_URL}/chat`, {
+      const res = await fetch(`${apiUrl}/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ conversation_id: Number(conversationId), message }),
       });
+      if (res.status === 401) {
+        signOut();
+        return;
+      }
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || `เซิร์ฟเวอร์ตอบกลับผิดพลาด (${res.status})`);
       setMessages((prev) => [...prev, { role: 'bot', text: data.reply }]);
@@ -224,26 +311,43 @@ function App() {
   };
 
   const hasMessages = messages.length > 0;
+  const showAuthGate = !token;
 
   return (
     <div className="flex h-[100dvh] w-full justify-center overflow-hidden">
-      <div className="flex h-full w-full max-w-[840px] flex-col px-4 pb-4 pt-5 sm:px-6 sm:pb-6 sm:pt-8">
+      <div
+        inert={showAuthGate ? true : undefined}
+        className={`flex h-full w-full max-w-[840px] flex-col px-4 pb-4 pt-5 transition-[filter] duration-300 sm:px-6 sm:pb-6 sm:pt-8 ${
+          showAuthGate ? 'pointer-events-none select-none blur-sm brightness-95' : ''
+        }`}
+      >
         <header className="mb-4 flex shrink-0 items-center gap-3 px-2 sm:mb-6">
           <Orb pulse={speakingIndex !== null} />
           <div className="leading-tight">
             <p className="text-label-lg text-on-surface">Lumina AI</p>
-            <p className="text-label-sm text-on-surface-variant">Powered by Gemini</p>
+            <p className="text-label-sm text-on-surface-variant">
+              {historyLoading ? 'กำลังโหลดบทสนทนา...' : 'Powered by Gemini'}
+            </p>
           </div>
-          {speechSupported && (
+          <div className="ml-auto flex items-center gap-1">
+            {speechSupported && (
+              <button
+                onClick={toggleVoiceOn}
+                aria-label={voiceOn ? 'ปิดเสียงอ่านคำตอบ' : 'เปิดเสียงอ่านคำตอบ'}
+                aria-pressed={voiceOn}
+                className="flex h-9 w-9 items-center justify-center rounded-full text-on-surface-variant transition hover:bg-black/5 hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+              >
+                <SpeakerIcon muted={!voiceOn} />
+              </button>
+            )}
             <button
-              onClick={toggleVoiceOn}
-              aria-label={voiceOn ? 'ปิดเสียงอ่านคำตอบ' : 'เปิดเสียงอ่านคำตอบ'}
-              aria-pressed={voiceOn}
-              className="ml-auto flex h-9 w-9 items-center justify-center rounded-full text-on-surface-variant transition hover:bg-black/5 hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+              onClick={signOut}
+              aria-label="ออกจากระบบ"
+              className="flex h-9 w-9 items-center justify-center rounded-full text-on-surface-variant transition hover:bg-black/5 hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
             >
-              <SpeakerIcon muted={!voiceOn} />
+              <LogoutIcon />
             </button>
-          )}
+          </div>
         </header>
 
         <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-white/70 bg-white/65 shadow-[0_20px_40px_-15px_rgba(127,90,240,0.12),0_4px_12px_rgba(15,17,26,0.03)] backdrop-blur-2xl">
@@ -309,6 +413,8 @@ function App() {
           </div>
         </div>
       </div>
+
+      {showAuthGate && <LoginModal onAuthenticated={handleAuthenticated} />}
     </div>
   );
 }

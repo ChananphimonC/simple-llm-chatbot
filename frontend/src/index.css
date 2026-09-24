@@ -68,8 +68,24 @@ body {
   }
 }
 
+.login-modal-in {
+  animation: login-modal-rise 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes login-modal-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .message-in,
+  .login-modal-in,
   .animate-\[breathe_2\.4s_ease-in-out_infinite\] {
     animation: none;
   }
