@@ -1,5 +1,14 @@
 import json
 import logging
+
+from dotenv import load_dotenv
+
+# Must run before importing any local module that reads os.getenv(...) at
+# import time (auth.py's JWT_SECRET, database.py's DATABASE_URL) - otherwise
+# those reads see an unset env var and silently fall back to their hardcoded
+# defaults regardless of what .env actually says.
+load_dotenv()
+
 import os
 
 import redis
@@ -11,15 +20,12 @@ from google.genai import types
 from google.genai.errors import APIError, ClientError
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from dotenv import load_dotenv
 
 from auth import MAX_PASSWORD_BYTES, create_access_token, get_current_user, hash_password, verify_password
 from database import Base, engine, get_db
 from models import Conversation, Message, User
 
 logger = logging.getLogger("uvicorn.error")
-
-load_dotenv()
 
 Base.metadata.create_all(bind=engine)  # lab-simple schema sync; a real app would use Alembic migrations
 
@@ -84,6 +90,31 @@ def create_conversation(db: Session = Depends(get_db), user: User = Depends(get_
     db.commit()
     db.refresh(convo)
     return {"conversation_id": convo.id}
+
+
+PREVIEW_LENGTH = 60
+
+
+@app.get("/conversations")
+def list_conversations(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    convos = (
+        db.query(Conversation)
+        .filter(Conversation.user_id == user.id)
+        .order_by(Conversation.id.desc())
+        .all()
+    )
+    result = []
+    for convo in convos:
+        first_user_message = next((m.content for m in convo.messages if m.role == "user"), None)
+        preview = (first_user_message or "แชทใหม่")[:PREVIEW_LENGTH]
+        result.append(
+            {
+                "conversation_id": convo.id,
+                "created_at": convo.created_at.isoformat(),
+                "preview": preview,
+            }
+        )
+    return result
 
 
 def _get_owned_conversation(db: Session, conversation_id: int, user: User) -> Conversation:

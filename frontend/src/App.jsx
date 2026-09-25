@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useId } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { speak, stopSpeaking, speechSupported } from './speech';
 import LoginModal from './LoginModal';
@@ -78,6 +78,84 @@ function UserIcon() {
       <circle cx="12" cy="8" r="4" />
       <path d="M4 20c1.5-4 5-6 8-6s6.5 2 8 6" />
     </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+function HistoryIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12a9 9 0 1 0 3-6.7" />
+      <path d="M3 4v4h4" />
+      <path d="M12 8v4l3 2" />
+    </svg>
+  );
+}
+
+function HistoryPanel({ conversations, loading, activeId, onSelect, onNewChat, onClose }) {
+  const panelRef = useRef(null);
+  const titleId = useId();
+
+  useEffect(() => {
+    const handlePointerDown = (e) => {
+      if (panelRef.current && !panelRef.current.contains(e.target)) onClose();
+    };
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={panelRef}
+      role="dialog"
+      aria-labelledby={titleId}
+      className="login-modal-in absolute right-0 top-full z-40 mt-2 w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-[1.5rem] border border-white/70 bg-white/90 shadow-[0_20px_50px_-15px_rgba(127,90,240,0.3),0_4px_16px_rgba(15,17,26,0.06)] backdrop-blur-2xl"
+    >
+      <div className="flex items-center justify-between border-b border-white/70 px-4 py-3">
+        <p id={titleId} className="text-label-lg text-on-surface">ประวัติการสนทนา</p>
+        <button
+          onClick={onNewChat}
+          className="flex items-center gap-1.5 rounded-full bg-gradient-to-br from-[#7f5af0] to-[#b580ff] px-3 py-1.5 text-label-md text-on-primary shadow-[0_4px_10px_rgba(127,90,240,0.3)] transition hover:shadow-[0_0_16px_rgba(112,214,255,0.45)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+        >
+          <PlusIcon />
+          แชทใหม่
+        </button>
+      </div>
+
+      <div className="max-h-80 overflow-y-auto no-scrollbar">
+        {loading ? (
+          <p className="px-4 py-6 text-center text-body-sm text-on-surface-variant">กำลังโหลด...</p>
+        ) : conversations.length === 0 ? (
+          <p className="px-4 py-6 text-center text-body-sm text-on-surface-variant">ยังไม่มีบทสนทนา</p>
+        ) : (
+          conversations.map((c) => (
+            <button
+              key={c.conversation_id}
+              onClick={() => onSelect(c.conversation_id)}
+              className={`block w-full truncate px-4 py-3 text-left text-body-sm transition hover:bg-black/5 ${
+                String(c.conversation_id) === String(activeId) ? 'bg-primary/10 text-primary' : 'text-on-surface'
+              }`}
+            >
+              {c.preview}
+            </button>
+          ))
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -162,6 +240,9 @@ function App() {
   const [conversationId, setConversationId] = useState(() => localStorage.getItem(CONVERSATION_KEY));
   const [showLoginModal, setShowLoginModal] = useState(() => !localStorage.getItem(TOKEN_KEY));
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [showHistoryPanel, setShowHistoryPanel] = useState(false);
+  const [conversations, setConversations] = useState([]);
+  const [conversationsLoading, setConversationsLoading] = useState(false);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -199,6 +280,55 @@ function App() {
     } catch {
       setMessages([{ role: 'error', text: 'เข้าสู่ระบบสำเร็จ แต่เปิดห้องแชทใหม่ไม่ได้ ลองรีเฟรชหน้านี้' }]);
     }
+  };
+
+  const openHistoryPanel = async () => {
+    setShowHistoryPanel(true);
+    setConversationsLoading(true);
+    try {
+      const res = await fetch(`${apiUrl}/conversations`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) {
+        signOut({ reopenModal: true });
+        return;
+      }
+      if (!res.ok) throw new Error();
+      setConversations(await res.json());
+    } catch {
+      setConversations([]);
+    } finally {
+      setConversationsLoading(false);
+    }
+  };
+
+  const startNewConversation = async () => {
+    setShowHistoryPanel(false);
+    try {
+      const res = await fetch(`${apiUrl}/conversations`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) {
+        signOut({ reopenModal: true });
+        return;
+      }
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      localStorage.setItem(CONVERSATION_KEY, String(data.conversation_id));
+      setConversationId(String(data.conversation_id));
+      setMessages([]);
+    } catch {
+      setMessages((prev) => [...prev, { role: 'error', text: 'เปิดห้องแชทใหม่ไม่สำเร็จ ลองอีกครั้ง' }]);
+    }
+  };
+
+  const selectConversation = (id) => {
+    setShowHistoryPanel(false);
+    if (String(id) === String(conversationId)) return;
+    setMessages([]);
+    localStorage.setItem(CONVERSATION_KEY, String(id));
+    setConversationId(String(id));
   };
 
   // Resume a known conversation's history on load (survives refresh) instead
@@ -354,6 +484,39 @@ function App() {
               >
                 <SpeakerIcon muted={!voiceOn} />
               </button>
+            )}
+            {token && (
+              <>
+                <button
+                  onClick={startNewConversation}
+                  aria-label="เริ่มแชทใหม่"
+                  title="เริ่มแชทใหม่"
+                  className="flex h-9 w-9 items-center justify-center rounded-full text-on-surface-variant transition hover:bg-black/5 hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                >
+                  <PlusIcon />
+                </button>
+                <div className="relative">
+                  <button
+                    onClick={() => (showHistoryPanel ? setShowHistoryPanel(false) : openHistoryPanel())}
+                    aria-label="ประวัติการสนทนา"
+                    title="ประวัติการสนทนา"
+                    aria-expanded={showHistoryPanel}
+                    className="flex h-9 w-9 items-center justify-center rounded-full text-on-surface-variant transition hover:bg-black/5 hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                  >
+                    <HistoryIcon />
+                  </button>
+                  {showHistoryPanel && (
+                    <HistoryPanel
+                      conversations={conversations}
+                      loading={conversationsLoading}
+                      activeId={conversationId}
+                      onSelect={selectConversation}
+                      onNewChat={startNewConversation}
+                      onClose={() => setShowHistoryPanel(false)}
+                    />
+                  )}
+                </div>
+              </>
             )}
             {token ? (
               <button
