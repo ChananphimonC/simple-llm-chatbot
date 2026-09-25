@@ -93,6 +93,19 @@ def create_conversation(db: Session = Depends(get_db), user: User = Depends(get_
 
 
 PREVIEW_LENGTH = 60
+TITLE_MAX_LENGTH = 60
+
+
+def _conversation_summary(convo: Conversation) -> dict:
+    first_user_message = next((m.content for m in convo.messages if m.role == "user"), None)
+    preview = (first_user_message or "แชทใหม่")[:PREVIEW_LENGTH]
+    return {
+        "conversation_id": convo.id,
+        "created_at": convo.created_at.isoformat(),
+        "preview": preview,
+        "title": convo.title,
+        "pinned": convo.pinned,
+    }
 
 
 @app.get("/conversations")
@@ -100,21 +113,10 @@ def list_conversations(db: Session = Depends(get_db), user: User = Depends(get_c
     convos = (
         db.query(Conversation)
         .filter(Conversation.user_id == user.id)
-        .order_by(Conversation.id.desc())
+        .order_by(Conversation.pinned.desc(), Conversation.id.desc())
         .all()
     )
-    result = []
-    for convo in convos:
-        first_user_message = next((m.content for m in convo.messages if m.role == "user"), None)
-        preview = (first_user_message or "แชทใหม่")[:PREVIEW_LENGTH]
-        result.append(
-            {
-                "conversation_id": convo.id,
-                "created_at": convo.created_at.isoformat(),
-                "preview": preview,
-            }
-        )
-    return result
+    return [_conversation_summary(convo) for convo in convos]
 
 
 def _get_owned_conversation(db: Session, conversation_id: int, user: User) -> Conversation:
@@ -126,6 +128,40 @@ def _get_owned_conversation(db: Session, conversation_id: int, user: User) -> Co
     if not convo:
         raise HTTPException(status_code=404, detail="ไม่พบบทสนทนานี้")
     return convo
+
+
+class UpdateConversationRequest(BaseModel):
+    title: str | None = None
+    pinned: bool | None = None
+
+
+@app.patch("/conversations/{conversation_id}")
+def update_conversation(
+    conversation_id: int,
+    req: UpdateConversationRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    convo = _get_owned_conversation(db, conversation_id, user)
+    if req.title is not None:
+        title = req.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="ชื่อแชทต้องไม่ว่าง")
+        convo.title = title[:TITLE_MAX_LENGTH]
+    if req.pinned is not None:
+        convo.pinned = req.pinned
+    db.commit()
+    db.refresh(convo)
+    return _conversation_summary(convo)
+
+
+@app.delete("/conversations/{conversation_id}")
+def delete_conversation(conversation_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    convo = _get_owned_conversation(db, conversation_id, user)
+    db.delete(convo)
+    db.commit()
+    _invalidate_history_cache(conversation_id)
+    return {"status": "ok"}
 
 
 @app.get("/conversations/{conversation_id}/messages")
