@@ -72,6 +72,15 @@ function LogoutIcon() {
   );
 }
 
+function UserIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 20c1.5-4 5-6 8-6s6.5 2 8 6" />
+    </svg>
+  );
+}
+
 function TypingIndicator() {
   return (
     <div className="flex items-center gap-3 py-1">
@@ -151,6 +160,7 @@ function MessageRow({ role, text, speaking, onToggleSpeak }) {
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY));
   const [conversationId, setConversationId] = useState(() => localStorage.getItem(CONVERSATION_KEY));
+  const [showLoginModal, setShowLoginModal] = useState(() => !localStorage.getItem(TOKEN_KEY));
   const [historyLoading, setHistoryLoading] = useState(false);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([]);
@@ -163,17 +173,19 @@ function App() {
 
   const apiUrl = import.meta.env.VITE_API_URL;
 
-  const signOut = () => {
+  const signOut = ({ reopenModal = false } = {}) => {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(CONVERSATION_KEY);
     setToken(null);
     setConversationId(null);
     setMessages([]);
+    if (reopenModal) setShowLoginModal(true);
   };
 
   const handleAuthenticated = async (newToken) => {
     localStorage.setItem(TOKEN_KEY, newToken);
     setToken(newToken);
+    setShowLoginModal(false);
 
     try {
       const res = await fetch(`${apiUrl}/conversations`, {
@@ -201,7 +213,7 @@ function App() {
     })
       .then((res) => {
         if (res.status === 401) {
-          signOut();
+          signOut({ reopenModal: true });
           return null;
         }
         if (!res.ok) throw new Error();
@@ -275,7 +287,11 @@ function App() {
 
   const send = async (text) => {
     const message = text.trim();
-    if (!message || loading || !token || !conversationId) return;
+    if (!message || loading) return;
+    if (!token || !conversationId) {
+      setShowLoginModal(true);
+      return;
+    }
 
     setMessages((prev) => [...prev, { role: 'user', text: message }]);
     setInput('');
@@ -291,7 +307,7 @@ function App() {
         body: JSON.stringify({ conversation_id: Number(conversationId), message }),
       });
       if (res.status === 401) {
-        signOut();
+        signOut({ reopenModal: true });
         return;
       }
       const data = await res.json();
@@ -311,14 +327,13 @@ function App() {
   };
 
   const hasMessages = messages.length > 0;
-  const showAuthGate = !token;
 
   return (
     <div className="flex h-[100dvh] w-full justify-center overflow-hidden">
       <div
-        inert={showAuthGate ? true : undefined}
+        inert={showLoginModal ? true : undefined}
         className={`flex h-full w-full max-w-[840px] flex-col px-4 pb-4 pt-5 transition-[filter] duration-300 sm:px-6 sm:pb-6 sm:pt-8 ${
-          showAuthGate ? 'pointer-events-none select-none blur-sm brightness-95' : ''
+          showLoginModal ? 'pointer-events-none select-none blur-sm brightness-95' : ''
         }`}
       >
         <header className="mb-4 flex shrink-0 items-center gap-3 px-2 sm:mb-6">
@@ -340,13 +355,23 @@ function App() {
                 <SpeakerIcon muted={!voiceOn} />
               </button>
             )}
-            <button
-              onClick={signOut}
-              aria-label="ออกจากระบบ"
-              className="flex h-9 w-9 items-center justify-center rounded-full text-on-surface-variant transition hover:bg-black/5 hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-            >
-              <LogoutIcon />
-            </button>
+            {token ? (
+              <button
+                onClick={() => signOut()}
+                aria-label="ออกจากระบบ"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-on-surface-variant transition hover:bg-black/5 hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+              >
+                <LogoutIcon />
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowLoginModal(true)}
+                aria-label="เข้าสู่ระบบ หรือ สมัครสมาชิก"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-on-surface-variant transition hover:bg-black/5 hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+              >
+                <UserIcon />
+              </button>
+            )}
           </div>
         </header>
 
@@ -414,7 +439,9 @@ function App() {
         </div>
       </div>
 
-      {showAuthGate && <LoginModal onAuthenticated={handleAuthenticated} />}
+      {showLoginModal && (
+        <LoginModal onAuthenticated={handleAuthenticated} onClose={() => setShowLoginModal(false)} />
+      )}
     </div>
   );
 }

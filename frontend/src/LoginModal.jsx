@@ -19,14 +19,22 @@ function SpinnerIcon() {
   );
 }
 
+function CloseIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 6 6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
 const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
 /**
- * Auth gate: mounted whenever the caller has no token. Renders the chat shell
- * behind it (via App's own layout) plus a blocking glass card on top —
- * there's no guest path, so this never offers a dismiss/close affordance.
+ * Sign in/register card. Opened either on load (no stored token) or later
+ * from the nav bar — dismissible either way, since browsing as a guest is
+ * allowed; only sending a message requires being signed in.
  */
-export default function LoginModal({ onAuthenticated }) {
+export default function LoginModal({ onAuthenticated, onClose }) {
   const [mode, setMode] = useState('login'); // 'login' | 'register'
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -42,6 +50,10 @@ export default function LoginModal({ onAuthenticated }) {
 
   useEffect(() => {
     const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        onClose?.();
+        return;
+      }
       if (e.key !== 'Tab') return;
       const nodes = cardRef.current?.querySelectorAll(FOCUSABLE);
       if (!nodes || nodes.length === 0) return;
@@ -57,7 +69,7 @@ export default function LoginModal({ onAuthenticated }) {
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [onClose]);
 
   const switchMode = (next) => {
     if (next === mode || loading) return;
@@ -105,7 +117,7 @@ export default function LoginModal({ onAuthenticated }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-[#191b24]/35 backdrop-blur-sm" />
+      <div className="absolute inset-0 bg-[#191b24]/35 backdrop-blur-sm" onClick={onClose} />
 
       <div
         ref={cardRef}
@@ -114,6 +126,17 @@ export default function LoginModal({ onAuthenticated }) {
         aria-labelledby={titleId}
         className="login-modal-in relative w-full max-w-sm rounded-[2rem] border border-white/70 bg-white/85 p-7 shadow-[0_28px_60px_-20px_rgba(127,90,240,0.35),0_4px_16px_rgba(15,17,26,0.06)] backdrop-blur-2xl sm:p-8"
       >
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="ปิด"
+            className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant transition hover:bg-black/5 hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+          >
+            <CloseIcon />
+          </button>
+        )}
+
         <div className="mb-6 flex flex-col items-center text-center">
           <span className="relative h-12 w-12 shrink-0 rounded-full bg-gradient-to-br from-[#7f5af0] via-[#a78bfa] to-[#70d6ff] shadow-[0_0_18px_rgba(112,214,255,0.45)]">
             <span className="absolute inset-[2px] rounded-full bg-gradient-to-tl from-white/40 to-transparent" />
