@@ -33,7 +33,7 @@ app.add_middleware(
 )
 
 client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"), decode_responses=True)
 
 # Free-tier quota errors (429) aren't worth retrying: the SDK's default of 5
 # attempts with exponential backoff just makes a doomed request take ~30s+

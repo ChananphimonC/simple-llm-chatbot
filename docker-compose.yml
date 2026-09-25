@@ -6,7 +6,11 @@ services:
       POSTGRES_PASSWORD: lumina_dev_pw
       POSTGRES_DB: lumina
     ports:
-      - "5432:5432"
+      # Host port 5433, not Postgres's default 5432: plenty of dev machines
+      # already have a Postgres install/service bound to 5432 (pgAdmin, Odoo,
+      # ...), and colliding with it silently routes connections to the wrong
+      # server instead of failing to bind.
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 
