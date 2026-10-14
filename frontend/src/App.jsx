@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useId } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { speak, stopSpeaking, speechSupported } from './speech';
+import { sttSupported, cameraSupported, isCameraCommand, listenOnce, captureCameraFrame } from './voice';
 import LoginModal from './LoginModal';
 
 const TOKEN_KEY = 'lumina_token';
@@ -77,6 +78,16 @@ function UserIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="8" r="4" />
       <path d="M4 20c1.5-4 5-6 8-6s6.5 2 8 6" />
+    </svg>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0" />
+      <path d="M12 18v4M8 22h8" />
     </svg>
   );
 }
@@ -416,6 +427,8 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [voiceOn, setVoiceOn] = useState(true);
   const [speakingIndex, setSpeakingIndex] = useState(null);
+  const [listening, setListening] = useState(false);
+  const [describingScene, setDescribingScene] = useState(false);
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
   const lastAutoSpokenRef = useRef(-1);
@@ -696,6 +709,84 @@ function App() {
     setLoading(false);
   };
 
+  // Captures one camera frame, asks Gemini to describe it, and speaks the
+  // result regardless of the voiceOn toggle — someone who just spoke a
+  // voice command to "see" clearly wants to hear the answer.
+  const describeSurroundings = async () => {
+    if (!token || !conversationId) {
+      setShowLoginModal(true);
+      return;
+    }
+    setDescribingScene(true);
+    try {
+      const frame = await captureCameraFrame();
+      const form = new FormData();
+      form.append('file', frame, 'frame.jpg');
+      const res = await fetch(`${apiUrl}/vision/describe`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      if (res.status === 401) {
+        signOut({ reopenModal: true });
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `เซิร์ฟเวอร์ตอบกลับผิดพลาด (${res.status})`);
+
+      const newIndex = messages.length;
+      lastAutoSpokenRef.current = newIndex; // this message is spoken explicitly below, not by the generic auto-speak effect
+      setMessages((prev) => [...prev, { role: 'bot', text: data.description }]);
+      playMessage(newIndex, data.description);
+    } catch (err) {
+      // Camera-access failures get a friendly Thai message; a server-side error
+      // (thrown above as `new Error(data.detail || ...)`) already carries a
+      // real, useful message, so show it as-is — same as the /chat error path.
+      const text =
+        err.message === 'unsupported'
+          ? 'เบราว์เซอร์นี้ไม่รองรับการเข้าถึงกล้อง'
+          : err.name === 'NotAllowedError'
+            ? 'ไม่ได้รับอนุญาตให้ใช้กล้อง กรุณาอนุญาตแล้วลองใหม่'
+            : err.message === 'capture-failed'
+              ? 'ไม่สามารถถ่ายภาพได้ ลองใหม่อีกครั้ง'
+              : err.message || 'ไม่สามารถดูภาพรอบตัวได้ ลองใหม่อีกครั้ง';
+      setMessages((prev) => [...prev, { role: 'error', text }]);
+    }
+    setDescribingScene(false);
+  };
+
+  // One voice command does double duty: "what's around me" phrasing opens the
+  // camera and describes the scene, anything else gets dictated straight into
+  // the chat, same as typing it.
+  const handleVoiceCommand = async () => {
+    if (!sttSupported || listening) return;
+    if (!token || !conversationId) {
+      setShowLoginModal(true);
+      return;
+    }
+    setListening(true);
+    try {
+      const transcript = await listenOnce();
+      setListening(false);
+      if (isCameraCommand(transcript)) {
+        if (!cameraSupported) {
+          setMessages((prev) => [...prev, { role: 'error', text: 'เบราว์เซอร์นี้ไม่รองรับการเข้าถึงกล้อง' }]);
+          return;
+        }
+        await describeSurroundings();
+      } else {
+        send(transcript);
+      }
+    } catch (err) {
+      setListening(false);
+      if (err.message === 'not-allowed') {
+        setMessages((prev) => [...prev, { role: 'error', text: 'ไม่ได้รับอนุญาตให้ใช้ไมโครโฟน กรุณาอนุญาตแล้วลองใหม่' }]);
+      } else if (err.message !== 'no-speech' && err.message !== 'aborted') {
+        setMessages((prev) => [...prev, { role: 'error', text: 'ฟังไม่สำเร็จ ลองใหม่อีกครั้ง' }]);
+      }
+    }
+  };
+
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -742,7 +833,13 @@ function App() {
           <div className="leading-tight">
             <p className="text-label-lg text-on-surface">Lumina AI</p>
             <p className="text-label-sm text-on-surface-variant">
-              {historyLoading ? 'กำลังโหลดบทสนทนา...' : 'Powered by Gemini'}
+              {historyLoading
+                ? 'กำลังโหลดบทสนทนา...'
+                : listening
+                  ? 'กำลังฟัง...'
+                  : describingScene
+                    ? 'กำลังดูภาพ...'
+                    : 'Powered by Gemini'}
             </p>
           </div>
           <div className="ml-auto flex items-center gap-1">
@@ -828,6 +925,19 @@ function App() {
               placeholder="พิมพ์ข้อความ... (Enter เพื่อส่ง)"
               className="max-h-40 flex-1 resize-none bg-transparent py-2.5 text-body-md text-on-surface placeholder:text-on-surface-variant focus:outline-none"
             />
+            {sttSupported && (
+              <button
+                onClick={handleVoiceCommand}
+                disabled={listening || describingScene}
+                aria-label={listening ? 'กำลังฟัง' : 'สั่งการด้วยเสียง (พูดว่า "เปิดกล้อง" เพื่อบอกว่าเห็นอะไรรอบตัว)'}
+                title='พูดข้อความ หรือพูดว่า "เปิดกล้อง" เพื่อให้บอกว่าเห็นอะไรรอบตัว'
+                className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-white/70 transition hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-not-allowed disabled:opacity-60 ${
+                  listening ? 'animate-[breathe_1.2s_ease-in-out_infinite] bg-primary/10 text-primary' : 'text-on-surface-variant'
+                }`}
+              >
+                <MicIcon />
+              </button>
+            )}
             <button
               onClick={() => send(input)}
               disabled={loading || !input.trim()}

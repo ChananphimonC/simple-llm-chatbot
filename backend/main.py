@@ -12,7 +12,7 @@ load_dotenv()
 import os
 
 import redis
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from google import genai
@@ -208,27 +208,14 @@ def _invalidate_history_cache(conversation_id: int) -> None:
         logger.warning("Redis unavailable, could not invalidate history cache", exc_info=True)
 
 
-@app.post("/chat")
-def chat(req: ChatRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    convo = _get_owned_conversation(db, req.conversation_id, user)
-    message = req.message.strip()
-    if not message:
-        raise HTTPException(status_code=400, detail="ข้อความว่างเปล่า")
-
-    history = _get_history(db, convo.id)
-    contents = [
-        types.Content(role=("user" if h["role"] == "user" else "model"), parts=[types.Part(text=h["content"])])
-        for h in history
-    ]
-    contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
-
+def _call_gemini(contents: list, *, log_context: str) -> str:
     try:
         response = client.models.generate_content(
             model="gemini-3.6-flash",
             contents=contents,
             config=types.GenerateContentConfig(http_options=NO_RETRY),
         )
-        reply = response.text
+        return response.text
     except ClientError as e:
         if e.code == 429:
             raise HTTPException(
@@ -245,8 +232,25 @@ def chat(req: ChatRequest, db: Session = Depends(get_db), user: User = Depends(g
         # come back as a normal JSON error response: an exception that escapes here
         # bypasses CORSMiddleware and the browser sees a broken response instead of
         # a readable error (fetch throws "Failed to fetch" or a JSON parse error).
-        logger.exception("Unhandled error in /chat")
+        logger.exception("Unhandled error in %s", log_context)
         raise HTTPException(status_code=500, detail="เกิดข้อผิดพลาดที่ไม่คาดคิด ลองใหม่อีกครั้ง")
+
+
+@app.post("/chat")
+def chat(req: ChatRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    convo = _get_owned_conversation(db, req.conversation_id, user)
+    message = req.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="ข้อความว่างเปล่า")
+
+    history = _get_history(db, convo.id)
+    contents = [
+        types.Content(role=("user" if h["role"] == "user" else "model"), parts=[types.Part(text=h["content"])])
+        for h in history
+    ]
+    contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
+
+    reply = _call_gemini(contents, log_context="/chat")
 
     db.add(Message(conversation_id=convo.id, role="user", content=message))
     db.add(Message(conversation_id=convo.id, role="model", content=reply))
@@ -254,6 +258,37 @@ def chat(req: ChatRequest, db: Session = Depends(get_db), user: User = Depends(g
     _invalidate_history_cache(convo.id)
 
     return {"reply": reply}
+
+
+# ---------- Vision (scene description for voice/accessibility use) ----------
+
+VISION_PROMPT = (
+    "อธิบายสิ่งที่เห็นในภาพนี้แบบกระชับ 2-3 ประโยค สำหรับผู้พิการทางสายตาที่ต้องการรู้ว่ารอบตัวมีอะไร "
+    "เน้นสิ่งสำคัญที่สุดก่อน เช่น คน สิ่งกีดขวางที่อาจเดินชน ป้าย/ข้อความสำคัญ และตำแหน่งคร่าวๆ (ซ้าย/ขวา/ตรงหน้า)"
+)
+
+MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB
+
+
+@app.post("/vision/describe")
+async def describe_scene(file: UploadFile = File(...), user: User = Depends(get_current_user)):
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="ไม่พบไฟล์ภาพ")
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="ไฟล์ภาพใหญ่เกินไป")
+
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_bytes(data=image_bytes, mime_type=file.content_type or "image/jpeg"),
+                types.Part(text=VISION_PROMPT),
+            ],
+        )
+    ]
+    description = _call_gemini(contents, log_context="/vision/describe")
+    return {"description": description}
 
 
 @app.get("/")
