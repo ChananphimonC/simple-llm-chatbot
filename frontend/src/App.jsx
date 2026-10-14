@@ -1,11 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect, useId } from 'react';
 import ReactMarkdown from 'react-markdown';
-<<<<<<< Updated upstream
-import { speak, stopSpeaking, speechSupported } from './speech';
-import { sttSupported, cameraSupported, isCameraCommand, listenOnce, captureCameraFrame } from './voice';
-=======
 import { speak, stopSpeaking, speechSupported, configureTts } from './speech';
->>>>>>> Stashed changes
 import LoginModal from './LoginModal';
 import CameraPanel from './CameraPanel';
 import { createRecognizer, configureStt, parseCommand, recognitionSupported, HELP_TEXT } from './voice';
@@ -136,16 +131,6 @@ function UserIcon() {
   );
 }
 
-function MicIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="9" y="2" width="6" height="12" rx="3" />
-      <path d="M5 11a7 7 0 0 0 14 0" />
-      <path d="M12 18v4M8 22h8" />
-    </svg>
-  );
-}
-
 function PlusIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
@@ -196,9 +181,7 @@ function ConversationMenu({ pinned, onTogglePin, onRename, onDelete, onClose }) 
     const handlePointerDown = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) onClose();
     };
-    sendRef.current = send;
-
-  const handleKeyDown = (e) => {
+    const handleKeyDown = (e) => {
       if (e.key === 'Escape') onClose();
     };
     document.addEventListener('mousedown', handlePointerDown);
@@ -484,10 +467,6 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [voiceOn, setVoiceOn] = useState(true);
   const [speakingIndex, setSpeakingIndex] = useState(null);
-<<<<<<< Updated upstream
-  const [listening, setListening] = useState(false);
-  const [describingScene, setDescribingScene] = useState(false);
-=======
   const [a11y, setA11y] = useState(() => localStorage.getItem(A11Y_KEY) === '1');
   const [voiceLang, setVoiceLang] = useState(() => localStorage.getItem(VOICE_LANG_KEY) || 'th-TH');
   const [listening, setListening] = useState(false);
@@ -495,9 +474,9 @@ function App() {
   const [micNote, setMicNote] = useState('');
   const [micPhase, setMicPhase] = useState('idle'); // idle | starting | hearing
   const [lastHeard, setLastHeard] = useState(null); // { text, action }
+  const [sttError, setSttError] = useState(''); // visible even outside a11y mode, unlike the spoken-only `announce`
   const [cameraFacing, setCameraFacing] = useState(null); // null = camera closed
   const [liveStatus, setLiveStatus] = useState('');
->>>>>>> Stashed changes
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
   const lastAutoSpokenRef = useRef(-1);
@@ -778,6 +757,16 @@ function App() {
         setListening(false);
         setMicPhase('idle');
       },
+      // Gemini STT (the primary recognizer) failed or came back empty for this one
+      // utterance. This is transient - a network hiccup, a quota blip, background
+      // noise - so unlike onError below it must NOT block the mic: it just tells the
+      // user their speech didn't make it through instead of going silently idle,
+      // which otherwise looks indistinguishable from the app not listening at all.
+      onTranscribeFailed: (reason) => {
+        const msg = reason === 'empty' ? 'ไม่ได้ยินข้อความที่ชัดเจน ลองพูดใหม่อีกครั้ง' : 'ถอดเสียงไม่สำเร็จ ลองพูดใหม่อีกครั้ง';
+        announce(msg);
+        setSttError(msg);
+      },
       onError: (code) => {
         console.warn('[speech recognition]', code);
         // 'no-speech' / 'aborted' are routine (silence, or we cancelled); everything else
@@ -801,6 +790,7 @@ function App() {
       setListening(true);
       setMicPhase('starting');
       setLastHeard(null);
+      setSttError('');
     } catch {
       recognizerRef.current = null;
     }
@@ -1036,84 +1026,7 @@ function App() {
     }
     setLoading(false);
   };
-
-  // Captures one camera frame, asks Gemini to describe it, and speaks the
-  // result regardless of the voiceOn toggle — someone who just spoke a
-  // voice command to "see" clearly wants to hear the answer.
-  const describeSurroundings = async () => {
-    if (!token || !conversationId) {
-      setShowLoginModal(true);
-      return;
-    }
-    setDescribingScene(true);
-    try {
-      const frame = await captureCameraFrame();
-      const form = new FormData();
-      form.append('file', frame, 'frame.jpg');
-      const res = await fetch(`${apiUrl}/vision/describe`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: form,
-      });
-      if (res.status === 401) {
-        signOut({ reopenModal: true });
-        return;
-      }
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || `เซิร์ฟเวอร์ตอบกลับผิดพลาด (${res.status})`);
-
-      const newIndex = messages.length;
-      lastAutoSpokenRef.current = newIndex; // this message is spoken explicitly below, not by the generic auto-speak effect
-      setMessages((prev) => [...prev, { role: 'bot', text: data.description }]);
-      playMessage(newIndex, data.description);
-    } catch (err) {
-      // Camera-access failures get a friendly Thai message; a server-side error
-      // (thrown above as `new Error(data.detail || ...)`) already carries a
-      // real, useful message, so show it as-is — same as the /chat error path.
-      const text =
-        err.message === 'unsupported'
-          ? 'เบราว์เซอร์นี้ไม่รองรับการเข้าถึงกล้อง'
-          : err.name === 'NotAllowedError'
-            ? 'ไม่ได้รับอนุญาตให้ใช้กล้อง กรุณาอนุญาตแล้วลองใหม่'
-            : err.message === 'capture-failed'
-              ? 'ไม่สามารถถ่ายภาพได้ ลองใหม่อีกครั้ง'
-              : err.message || 'ไม่สามารถดูภาพรอบตัวได้ ลองใหม่อีกครั้ง';
-      setMessages((prev) => [...prev, { role: 'error', text }]);
-    }
-    setDescribingScene(false);
-  };
-
-  // One voice command does double duty: "what's around me" phrasing opens the
-  // camera and describes the scene, anything else gets dictated straight into
-  // the chat, same as typing it.
-  const handleVoiceCommand = async () => {
-    if (!sttSupported || listening) return;
-    if (!token || !conversationId) {
-      setShowLoginModal(true);
-      return;
-    }
-    setListening(true);
-    try {
-      const transcript = await listenOnce();
-      setListening(false);
-      if (isCameraCommand(transcript)) {
-        if (!cameraSupported) {
-          setMessages((prev) => [...prev, { role: 'error', text: 'เบราว์เซอร์นี้ไม่รองรับการเข้าถึงกล้อง' }]);
-          return;
-        }
-        await describeSurroundings();
-      } else {
-        send(transcript);
-      }
-    } catch (err) {
-      setListening(false);
-      if (err.message === 'not-allowed') {
-        setMessages((prev) => [...prev, { role: 'error', text: 'ไม่ได้รับอนุญาตให้ใช้ไมโครโฟน กรุณาอนุญาตแล้วลองใหม่' }]);
-      } else if (err.message !== 'no-speech' && err.message !== 'aborted') {
-        setMessages((prev) => [...prev, { role: 'error', text: 'ฟังไม่สำเร็จ ลองใหม่อีกครั้ง' }]);
-      }
-    }
-  };
+  sendRef.current = send;
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1165,9 +1078,7 @@ function App() {
                 ? 'กำลังโหลดบทสนทนา...'
                 : listening
                   ? 'กำลังฟัง...'
-                  : describingScene
-                    ? 'กำลังดูภาพ...'
-                    : 'Powered by Gemini'}
+                  : 'Powered by Gemini'}
             </p>
           </div>
           <div className="ml-auto flex items-center gap-1">
@@ -1277,6 +1188,11 @@ function App() {
               ได้ยินว่า “{lastHeard.text}” → {lastHeard.action}
             </p>
           )}
+          {sttError && !listening && (
+            <p role="alert" className="mb-1 text-center text-label-sm text-error">
+              {sttError}
+            </p>
+          )}
           {micNote ? (
             <p role="alert" className="mb-2 text-center text-label-md text-error">
               {micNote} (กดปุ่มไมค์เพื่อลองใหม่)
@@ -1310,20 +1226,6 @@ function App() {
               placeholder="พิมพ์ข้อความ... (Enter เพื่อส่ง)"
               className="max-h-40 flex-1 resize-none bg-transparent py-2.5 text-body-md text-on-surface placeholder:text-on-surface-variant focus:outline-none"
             />
-<<<<<<< Updated upstream
-            {sttSupported && (
-              <button
-                onClick={handleVoiceCommand}
-                disabled={listening || describingScene}
-                aria-label={listening ? 'กำลังฟัง' : 'สั่งการด้วยเสียง (พูดว่า "เปิดกล้อง" เพื่อบอกว่าเห็นอะไรรอบตัว)'}
-                title='พูดข้อความ หรือพูดว่า "เปิดกล้อง" เพื่อให้บอกว่าเห็นอะไรรอบตัว'
-                className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-white/70 transition hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-not-allowed disabled:opacity-60 ${
-                  listening ? 'animate-[breathe_1.2s_ease-in-out_infinite] bg-primary/10 text-primary' : 'text-on-surface-variant'
-                }`}
-              >
-                <MicIcon />
-              </button>
-=======
             {recognitionSupported && (
               <>
                 <button
@@ -1344,7 +1246,6 @@ function App() {
                   <MicIcon />
                 </button>
               </>
->>>>>>> Stashed changes
             )}
             <button
               onClick={() => send(input)}

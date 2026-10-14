@@ -64,7 +64,7 @@ function toBase64(bytes) {
   return btoa(bin);
 }
 
-function createGeminiRecognizer({ lang, onAudioStart, onSpeechStart, onFinal, onEnd, onError }) {
+function createGeminiRecognizer({ lang, onAudioStart, onSpeechStart, onFinal, onEnd, onError, onTranscribeFailed }) {
   let cancelled = false;
   let ended = false;
   let stream = null;
@@ -99,11 +99,17 @@ function createGeminiRecognizer({ lang, onAudioStart, onSpeechStart, onFinal, on
       if (!res.ok) throw new Error(`stt ${res.status}`);
       const { text } = await res.json();
       console.info('[stt] Gemini heard:', text);
-      if (!cancelled && text?.trim()) onFinal?.(text.trim());
+      if (cancelled) return;
+      if (text?.trim()) onFinal?.(text.trim());
+      // Recorded >= MIN_SPEECH_MS of "speech" but Gemini transcribed nothing intelligible
+      // (noise, a cough, a stray click) - without this the mic just goes quiet with no
+      // feedback, indistinguishable from the app not having heard anything at all.
+      else onTranscribeFailed?.('empty');
     } catch (err) {
       if (!cancelled) {
         console.warn('[stt] Gemini failed, using browser recognizer for a while:', err);
         sttDisabledUntil = Date.now() + STT_RETRY_AFTER_MS;
+        onTranscribeFailed?.('request-failed');
       }
     } finally {
       finish();
@@ -265,7 +271,11 @@ function createBrowserRecognizer({ lang = 'th-TH', onAudioStart, onSpeechStart, 
 // Spoken commands. Thai recognizers often insert stray spaces, so matching is done on
 // the transcript with whitespace removed.
 const COMMANDS = [
-  { type: 'camera-close', re: /ปิดกล้อง|closecamera/ },
+  // (?<!เ)ปิด matters: "เปิด" (open) ends in the same three characters as "ปิด"
+  // (close) - เ+ปิด - so a bare /ปิด.../ regex also matches inside "เปิดกล้อง"
+  // (open camera) and, since this entry is checked first, silently routed every
+  // "open camera" command to camera-close instead.
+  { type: 'camera-close', re: /(?<!เ)ปิดกล้อง|closecamera/ },
   { type: 'camera-back', re: /(เปิด|สลับ|ใช้|เปลี่ยน|open|switch).*(กล้องหลัง|backcamera|rearcamera)|^กล้องหลัง/ },
   { type: 'camera-front', re: /(เปิด|สลับ|ใช้|เปลี่ยน|open|switch).*(กล้องหน้า|กล้องเซลฟี่|frontcamera|selfie)|^กล้องหน้า/ },
   { type: 'camera-open', re: /^(เปิดกล้อง|opencamera)$/ },
@@ -274,7 +284,7 @@ const COMMANDS = [
   { type: 'repeat', re: /พูดอีก(ครั้ง|ที)|อีกครั้ง|ว่าอีกที|repeat/ },
   { type: 'stop-speaking', re: /^(หยุดพูด|หยุด|เงียบ|พอ|stop)$/ },
   { type: 'new-chat', re: /แชทใหม่|เริ่มใหม่|newchat/ },
-  { type: 'a11y-off', re: /ปิดโหมด(ช่วยเหลือ|ผู้พิการ)|exitaccessibility/ },
+  { type: 'a11y-off', re: /(?<!เ)ปิดโหมด(ช่วยเหลือ|ผู้พิการ)|exitaccessibility/ },
   { type: 'help', re: /^(ช่วยเหลือ|คำสั่ง|ทำอะไรได้บ้าง|help)$|มีคำสั่งอะไร/ },
 ];
 
