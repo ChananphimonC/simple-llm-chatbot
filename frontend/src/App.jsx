@@ -1,11 +1,38 @@
 import { useState, useRef, useEffect, useLayoutEffect, useId } from 'react';
 import ReactMarkdown from 'react-markdown';
+<<<<<<< Updated upstream
 import { speak, stopSpeaking, speechSupported } from './speech';
 import { sttSupported, cameraSupported, isCameraCommand, listenOnce, captureCameraFrame } from './voice';
+=======
+import { speak, stopSpeaking, speechSupported, configureTts } from './speech';
+>>>>>>> Stashed changes
 import LoginModal from './LoginModal';
+import CameraPanel from './CameraPanel';
+import { createRecognizer, configureStt, parseCommand, recognitionSupported, HELP_TEXT } from './voice';
 
 const TOKEN_KEY = 'lumina_token';
 const CONVERSATION_KEY = 'lumina_conversation_id';
+const A11Y_KEY = 'lumina_accessibility';
+const VOICE_LANG_KEY = 'lumina_voice_lang';
+
+const DEFAULT_DESCRIBE_PROMPT = 'ภาพนี้มีอะไรบ้าง ช่วยอธิบายสิ่งที่เห็น';
+const READ_TEXT_PROMPT = 'อ่านข้อความทั้งหมดที่เห็นในภาพนี้ให้ฟัง';
+const COMMAND_LABELS = {
+  'camera-back': 'เปิดกล้องหลัง',
+  'camera-front': 'เปิดกล้องหน้า',
+  'camera-open': 'เปิดกล้อง',
+  'camera-close': 'ปิดกล้อง',
+  describe: 'ถ่ายรูปและอธิบาย',
+  read: 'ถ่ายรูปและอ่านข้อความ',
+  repeat: 'พูดซ้ำ',
+  'stop-speaking': 'หยุดพูด',
+  'new-chat': 'แชทใหม่',
+  'a11y-off': 'ปิดโหมดช่วยเหลือ',
+  help: 'อ่านคำสั่งทั้งหมด',
+};
+const LISTEN_TIMEOUT_MS = 45000; // covers up to 30s of speech plus transcription
+const HEADER_BTN =
+  'flex h-9 w-9 items-center justify-center rounded-full text-on-surface-variant transition hover:bg-black/5 hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50';
 
 const SUGGESTIONS = [
   'สรุปบทความยาวๆ ให้อ่านง่าย',
@@ -41,6 +68,33 @@ function SpeakerIcon({ muted = false }) {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 9v6h4l5 4V5L8 9H4Z" />
       {muted ? <path d="M17 9l5 6M22 9l-5 6" /> : <path d="M16.5 8.5a5 5 0 0 1 0 7M19.5 6a9 9 0 0 1 0 12" />}
+    </svg>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+    </svg>
+  );
+}
+
+function CameraIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z" />
+      <circle cx="12" cy="13" r="3.5" />
+    </svg>
+  );
+}
+
+function EyeIcon({ active = false }) {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" />
+      <circle cx="12" cy="12" r="3" fill={active ? 'currentColor' : 'none'} />
     </svg>
   );
 }
@@ -142,7 +196,9 @@ function ConversationMenu({ pinned, onTogglePin, onRename, onDelete, onClose }) 
     const handlePointerDown = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) onClose();
     };
-    const handleKeyDown = (e) => {
+    sendRef.current = send;
+
+  const handleKeyDown = (e) => {
       if (e.key === 'Escape') onClose();
     };
     document.addEventListener('mousedown', handlePointerDown);
@@ -370,11 +426,12 @@ function ReplayButton({ speaking, onClick }) {
   );
 }
 
-function MessageRow({ role, text, speaking, onToggleSpeak }) {
+function MessageRow({ role, text, image, speaking, onToggleSpeak }) {
   if (role === 'user') {
     return (
       <div className="flex w-full justify-end message-in">
-        <div className="max-w-[75%] rounded-[1.5rem] rounded-br-lg bg-white px-5 py-3 text-body-md text-on-surface shadow-[0_4px_16px_rgba(15,17,26,0.06)]">
+        <div className="flex max-w-[75%] flex-col gap-2 rounded-[1.5rem] rounded-br-lg bg-white px-5 py-3 text-body-md text-on-surface shadow-[0_4px_16px_rgba(15,17,26,0.06)]">
+          {image && <img src={image} alt="รูปที่ถ่ายจากกล้อง" className="max-h-48 rounded-xl object-cover" />}
           {text}
         </div>
       </div>
@@ -427,13 +484,40 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [voiceOn, setVoiceOn] = useState(true);
   const [speakingIndex, setSpeakingIndex] = useState(null);
+<<<<<<< Updated upstream
   const [listening, setListening] = useState(false);
   const [describingScene, setDescribingScene] = useState(false);
+=======
+  const [a11y, setA11y] = useState(() => localStorage.getItem(A11Y_KEY) === '1');
+  const [voiceLang, setVoiceLang] = useState(() => localStorage.getItem(VOICE_LANG_KEY) || 'th-TH');
+  const [listening, setListening] = useState(false);
+  const [micBlocked, setMicBlocked] = useState(false);
+  const [micNote, setMicNote] = useState('');
+  const [micPhase, setMicPhase] = useState('idle'); // idle | starting | hearing
+  const [lastHeard, setLastHeard] = useState(null); // { text, action }
+  const [cameraFacing, setCameraFacing] = useState(null); // null = camera closed
+  const [liveStatus, setLiveStatus] = useState('');
+>>>>>>> Stashed changes
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
   const lastAutoSpokenRef = useRef(-1);
+  const recognizerRef = useRef(null);
+  const cameraRef = useRef(null);
+  const pendingCaptureRef = useRef(null); // 'describe' | 'read' queued until the camera is ready
+  // Recognizer / camera callbacks outlive the render that created them; these refs keep
+  // them pointed at current state and handlers.
+  const a11yRef = useRef(a11y);
+  const voiceLangRef = useRef(voiceLang);
+  const sendRef = useRef(null);
+  const transcriptRef = useRef(null);
+  const messagesRef = useRef(messages);
+  a11yRef.current = a11y;
+  voiceLangRef.current = voiceLang;
+  messagesRef.current = messages;
 
   const apiUrl = import.meta.env.VITE_API_URL;
+  configureTts({ apiUrl, getToken: () => localStorage.getItem(TOKEN_KEY) });
+  configureStt({ apiUrl, getToken: () => localStorage.getItem(TOKEN_KEY) });
 
   const signOut = ({ reopenModal = false } = {}) => {
     localStorage.removeItem(TOKEN_KEY);
@@ -666,6 +750,244 @@ function App() {
     });
   };
 
+  // ---------- Voice input, camera & accessibility mode ----------
+
+  const handsFree = a11y && recognitionSupported && !micBlocked;
+
+  // Status line for screen readers; in accessibility mode it is also spoken aloud.
+  const announce = (text) => {
+    setLiveStatus(text);
+    if (a11yRef.current) playMessage('sys', text);
+  };
+
+  const startListening = () => {
+    if (recognizerRef.current) return;
+    stopSpeaking();
+    setSpeakingIndex(null);
+    const rec = createRecognizer({
+      lang: voiceLangRef.current,
+      onAudioStart: () => setMicPhase('starting'),
+      onSpeechStart: () => setMicPhase('hearing'),
+      onInterim: (t) => setInput(t),
+      onFinal: (t) => {
+        setInput('');
+        transcriptRef.current?.(t);
+      },
+      onEnd: () => {
+        recognizerRef.current = null;
+        setListening(false);
+        setMicPhase('idle');
+      },
+      onError: (code) => {
+        console.warn('[speech recognition]', code);
+        // 'no-speech' / 'aborted' are routine (silence, or we cancelled); everything else
+        // would otherwise fail invisibly and make the app look like it ignores you.
+        if (code === 'no-speech' || code === 'aborted') return;
+        const reasons = {
+          'not-allowed': 'ไม่ได้รับอนุญาตให้ใช้ไมโครโฟน กดไอคอนกุญแจข้าง URL แล้วอนุญาตไมโครโฟน',
+          'service-not-allowed': 'เบราว์เซอร์นี้ไม่อนุญาตให้ใช้รู้จำเสียง',
+          'audio-capture': 'ไม่พบไมโครโฟน ตรวจสอบว่าเสียบอุปกรณ์และเลือกไมค์ถูกตัว',
+          network: 'รู้จำเสียงต้องต่อเน็ต (Chrome ส่งเสียงไปประมวลผลที่ Google) ตอนนี้เชื่อมต่อไม่ได้',
+          'language-not-supported': 'เบราว์เซอร์ไม่รองรับภาษานี้ ลองสลับ TH/EN',
+        };
+        setMicBlocked(true); // stop the hands-free loop from retrying forever
+        setMicNote(reasons[code] || `รู้จำเสียงผิดพลาด (${code})`);
+      },
+    });
+    if (!rec) return;
+    try {
+      rec.start();
+      recognizerRef.current = rec;
+      setListening(true);
+      setMicPhase('starting');
+      setLastHeard(null);
+    } catch {
+      recognizerRef.current = null;
+    }
+  };
+
+  const stopListening = () => {
+    const rec = recognizerRef.current;
+    if (!rec) return;
+    rec.abort();
+    // Some browsers never fire onend after abort() on a hung session - force a reset.
+    setTimeout(() => {
+      if (recognizerRef.current === rec) {
+        recognizerRef.current = null;
+        setListening(false);
+        setMicPhase('idle');
+      }
+    }, 600);
+  };
+
+  const toggleMic = () => {
+    if (micBlocked) {
+      setMicBlocked(false);
+      setMicNote('');
+    }
+    if (listening) stopListening();
+    else startListening();
+  };
+
+  const toggleVoiceLang = () => {
+    const next = voiceLang === 'th-TH' ? 'en-US' : 'th-TH';
+    localStorage.setItem(VOICE_LANG_KEY, next);
+    setVoiceLang(next);
+    voiceLangRef.current = next;
+    stopListening();
+  };
+
+  const setAccessibility = (on) => {
+    localStorage.setItem(A11Y_KEY, on ? '1' : '0');
+    a11yRef.current = on;
+    setA11y(on);
+    setMicBlocked(false);
+    setMicNote('');
+    if (on) {
+      setVoiceOn(true);
+      announce(
+        recognitionSupported
+          ? 'เปิดโหมดช่วยเหลือแล้ว ฉันจะฟังคำสั่งเสียงของคุณอัตโนมัติ พูดว่า ช่วยเหลือ เพื่อฟังคำสั่งทั้งหมด'
+          : 'เปิดโหมดช่วยเหลือแล้ว แต่เบราว์เซอร์นี้ไม่รองรับการสั่งงานด้วยเสียง กรุณาใช้ Chrome หรือ Safari'
+      );
+    } else {
+      stopListening();
+      stopSpeaking();
+      setSpeakingIndex(null);
+      setLiveStatus('ปิดโหมดช่วยเหลือแล้ว');
+    }
+  };
+
+  const openCamera = (facing) => {
+    if (cameraFacing === facing) {
+      announce(facing === 'user' ? 'กล้องหน้าเปิดอยู่แล้ว' : 'กล้องหลังเปิดอยู่แล้ว');
+      return;
+    }
+    setCameraFacing(facing);
+  };
+
+  const closeCamera = () => {
+    pendingCaptureRef.current = null;
+    setCameraFacing(null);
+    announce('ปิดกล้องแล้ว');
+  };
+
+  const captureAndSend = (kind, customPrompt) => {
+    const dataUrl = cameraRef.current?.capture();
+    if (!dataUrl) {
+      announce('ถ่ายรูปไม่สำเร็จ ลองอีกครั้ง');
+      return;
+    }
+    navigator.vibrate?.(40);
+    const prompt = customPrompt || (kind === 'read' ? READ_TEXT_PROMPT : DEFAULT_DESCRIBE_PROMPT);
+    sendRef.current(prompt, dataUrl);
+  };
+
+  // Shutter button: whatever is typed becomes the question about the photo.
+  const handleShutter = () => {
+    const typed = input.trim();
+    if (typed) setInput('');
+    captureAndSend('describe', typed);
+  };
+
+  // CameraPanel reports once the stream is live (or has failed).
+  const handleCameraStatus = (status, ready) => {
+    if (!ready) {
+      pendingCaptureRef.current = null;
+      announce(status);
+      return;
+    }
+    const pending = pendingCaptureRef.current;
+    if (pending) {
+      pendingCaptureRef.current = null;
+      // Give auto-exposure a moment so the first frame isn't black.
+      setTimeout(() => captureAndSend(pending), 1200);
+      setLiveStatus(status);
+      return;
+    }
+    announce(`${status} พูดว่า ถ่ายรูป หรือ อธิบาย เพื่อให้ฉันบอกว่าเห็นอะไร`);
+  };
+
+  const captureFromCamera = (kind) => {
+    if (cameraFacing) {
+      captureAndSend(kind);
+    } else {
+      pendingCaptureRef.current = kind;
+      setCameraFacing('environment');
+      announce('กำลังเปิดกล้องหลัง');
+    }
+  };
+
+  const runCommand = (type) => {
+    switch (type) {
+      case 'camera-back':
+        return openCamera('environment');
+      case 'camera-front':
+        return openCamera('user');
+      case 'camera-open':
+        return openCamera(cameraFacing || 'environment');
+      case 'camera-close':
+        return cameraFacing ? closeCamera() : announce('กล้องปิดอยู่แล้ว');
+      case 'describe':
+      case 'read':
+        return captureFromCamera(type);
+      case 'repeat': {
+        const all = messagesRef.current;
+        const lastIndex = all.map((m) => m.role).lastIndexOf('bot');
+        return lastIndex >= 0 ? playMessage(lastIndex, all[lastIndex].text) : announce('ยังไม่มีคำตอบให้พูดซ้ำ');
+      }
+      case 'stop-speaking':
+        stopSpeaking();
+        return setSpeakingIndex(null);
+      case 'new-chat':
+        startNewConversation();
+        return announce('เริ่มแชทใหม่แล้ว');
+      case 'a11y-off':
+        return setAccessibility(false);
+      case 'help':
+        return announce(HELP_TEXT);
+    }
+  };
+
+  transcriptRef.current = (text) => {
+    // Short, anchored phrases are voice commands in every mode; anything longer is a question.
+    const command = parseCommand(text);
+    console.info('[voice] heard:', text, '->', command || 'chat');
+    setLastHeard({ text, action: command ? COMMAND_LABELS[command] : 'ส่งเป็นคำถามถึง AI' });
+    if (command) runCommand(command);
+    else sendRef.current(text);
+  };
+
+  // Hands-free loop: listen -> (command | send) -> speak the reply -> listen again.
+  useEffect(() => {
+    if (!handsFree || showLoginModal || loading || historyLoading || speakingIndex !== null || listening) return;
+    const timer = setTimeout(startListening, 350);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handsFree, showLoginModal, loading, historyLoading, speakingIndex, listening]);
+
+  // A session that neither hears anything nor ends (stuck permission prompt, dead input device)
+  // would leave the app "listening" forever; recycle it so the loop keeps trying.
+  useEffect(() => {
+    if (!listening) return;
+    const timer = setTimeout(stopListening, LISTEN_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listening]);
+
+  // Never listen while talking: the mic would pick up our own voice.
+  useEffect(() => {
+    if (speakingIndex !== null && listening) stopListening();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speakingIndex, listening]);
+
+  useEffect(
+    () => () => {
+      recognizerRef.current?.abort();
+    },
+    []
+  );
+
   useLayoutEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -673,16 +995,17 @@ function App() {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [input]);
 
-  const send = async (text) => {
+  const send = async (text, image = null) => {
     const message = text.trim();
     if (!message || loading) return;
     if (!token || !conversationId) {
+      if (a11yRef.current) announce('กรุณาเข้าสู่ระบบก่อนคุยกับ AI');
       setShowLoginModal(true);
       return;
     }
 
     const isFirstMessage = messages.length === 0;
-    setMessages((prev) => [...prev, { role: 'user', text: message }]);
+    setMessages((prev) => [...prev, { role: 'user', text: message, image }]);
     setInput('');
     setLoading(true);
 
@@ -693,7 +1016,12 @@ function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ conversation_id: Number(conversationId), message }),
+        body: JSON.stringify({
+          conversation_id: Number(conversationId),
+          message,
+          accessibility: a11y,
+          ...(image && { image: image.split(',')[1], image_mime: 'image/jpeg' }),
+        }),
       });
       if (res.status === 401) {
         signOut({ reopenModal: true });
@@ -843,7 +1171,23 @@ function App() {
             </p>
           </div>
           <div className="ml-auto flex items-center gap-1">
-            {speechSupported && (
+            <button
+              onClick={() => setAccessibility(!a11y)}
+              aria-label={a11y ? 'ปิดโหมดช่วยเหลือผู้พิการทางสายตา' : 'เปิดโหมดช่วยเหลือผู้พิการทางสายตา'}
+              aria-pressed={a11y}
+              className={`${HEADER_BTN} ${a11y ? 'bg-primary/15 !text-primary' : ''}`}
+            >
+              <EyeIcon active={a11y} />
+            </button>
+            <button
+              onClick={() => (cameraFacing ? closeCamera() : setCameraFacing('environment'))}
+              aria-label={cameraFacing ? 'ปิดกล้อง' : 'เปิดกล้อง'}
+              aria-pressed={Boolean(cameraFacing)}
+              className={`${HEADER_BTN} ${cameraFacing ? 'bg-primary/15 !text-primary' : ''}`}
+            >
+              <CameraIcon />
+            </button>
+            {speechSupported && !a11y && (
               <button
                 onClick={toggleVoiceOn}
                 aria-label={voiceOn ? 'ปิดเสียงอ่านคำตอบ' : 'เปิดเสียงอ่านคำตอบ'}
@@ -873,6 +1217,17 @@ function App() {
           </div>
         </header>
 
+        {cameraFacing && (
+          <CameraPanel
+            ref={cameraRef}
+            facing={cameraFacing}
+            onFlip={() => setCameraFacing(cameraFacing === 'user' ? 'environment' : 'user')}
+            onClose={closeCamera}
+            onShutter={handleShutter}
+            onStatus={handleCameraStatus}
+          />
+        )}
+
         <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-white/70 bg-white/65 shadow-[0_20px_40px_-15px_rgba(127,90,240,0.12),0_4px_12px_rgba(15,17,26,0.03)] backdrop-blur-2xl">
           <div className="flex-1 overflow-y-auto px-5 py-6 sm:px-8 sm:py-8 no-scrollbar">
             {!hasMessages ? (
@@ -897,12 +1252,13 @@ function App() {
                 </div>
               </div>
             ) : (
-              <div className="flex flex-col gap-5">
+              <div className="flex flex-col gap-5" role="log" aria-live={a11y ? 'off' : 'polite'}>
                 {messages.map((msg, i) => (
                   <MessageRow
                     key={i}
                     role={msg.role}
                     text={msg.text}
+                    image={msg.image}
                     speaking={speakingIndex === i}
                     onToggleSpeak={() => toggleSpeak(i, msg.text)}
                   />
@@ -915,6 +1271,35 @@ function App() {
         </main>
 
         <div className="mt-3 shrink-0 sm:mt-4">
+          <div role="status" aria-live="polite" className="sr-only">{liveStatus}</div>
+          {lastHeard && !listening && (
+            <p className="mb-1 text-center text-label-sm text-on-surface-variant">
+              ได้ยินว่า “{lastHeard.text}” → {lastHeard.action}
+            </p>
+          )}
+          {micNote ? (
+            <p role="alert" className="mb-2 text-center text-label-md text-error">
+              {micNote} (กดปุ่มไมค์เพื่อลองใหม่)
+            </p>
+          ) : (
+            (a11y || listening) && (
+              <p className="mb-2 text-center text-label-md text-primary" aria-hidden="true">
+                {listening
+                  ? micPhase === 'hearing'
+                    ? 'ได้ยินเสียงแล้ว... พูดให้จบประโยคแล้วหยุดสักครู่'
+                    : micPhase === 'starting'
+                      ? `กำลังฟัง... พูดได้เลย (${voiceLang === 'th-TH' ? 'ไทย' : 'English'})`
+                      : 'กำลังเปิดไมโครโฟน... (ถ้าเบราว์เซอร์ถามสิทธิ์ ให้กดอนุญาต)'
+                  : loading
+                    ? 'กำลังคิดคำตอบ...'
+                    : speakingIndex !== null
+                      ? 'กำลังพูด... (กดไมค์เพื่อขัดจังหวะ)'
+                      : showLoginModal
+                        ? 'เข้าสู่ระบบก่อน แล้วระบบจะเริ่มฟัง'
+                        : 'รอสักครู่...'}
+              </p>
+            )
+          )}
           <div className="focus-within:shadow-[0_0_0_1px_rgba(102,62,213,0.35),0_0_28px_rgba(112,214,255,0.35)] flex items-end gap-2 rounded-[1.75rem] border border-white/70 bg-white/70 p-2 pl-5 shadow-[0_8px_24px_rgba(15,17,26,0.05)] backdrop-blur-2xl transition-shadow">
             <textarea
               ref={textareaRef}
@@ -925,6 +1310,7 @@ function App() {
               placeholder="พิมพ์ข้อความ... (Enter เพื่อส่ง)"
               className="max-h-40 flex-1 resize-none bg-transparent py-2.5 text-body-md text-on-surface placeholder:text-on-surface-variant focus:outline-none"
             />
+<<<<<<< Updated upstream
             {sttSupported && (
               <button
                 onClick={handleVoiceCommand}
@@ -937,6 +1323,28 @@ function App() {
               >
                 <MicIcon />
               </button>
+=======
+            {recognitionSupported && (
+              <>
+                <button
+                  onClick={toggleVoiceLang}
+                  aria-label={`ภาษาที่ฟัง: ${voiceLang === 'th-TH' ? 'ไทย' : 'อังกฤษ'} กดเพื่อสลับ`}
+                  className="flex h-11 shrink-0 items-center justify-center rounded-full px-2 text-label-sm text-on-surface-variant transition hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                >
+                  {voiceLang === 'th-TH' ? 'TH' : 'EN'}
+                </button>
+                <button
+                  onClick={toggleMic}
+                  aria-label={listening ? 'หยุดฟัง' : 'พูดกับ AI'}
+                  aria-pressed={listening}
+                  className={`flex shrink-0 items-center justify-center rounded-full transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+                    a11y ? 'h-14 w-14' : 'h-11 w-11'
+                  } ${listening ? 'animate-pulse bg-error text-on-primary' : 'bg-black/5 text-on-surface hover:bg-black/10'}`}
+                >
+                  <MicIcon />
+                </button>
+              </>
+>>>>>>> Stashed changes
             )}
             <button
               onClick={() => send(input)}

@@ -4,7 +4,9 @@ const THAI_RANGE = /[฀-๿]/;
 // forcing a switch to the en-US voice mid-sentence.
 const NEUTRAL_CHAR = /[\s.,!?;:()"'`\-–—…0-9%/+]/;
 
-export const speechSupported = typeof window !== 'undefined' && 'speechSynthesis' in window;
+const browserTtsSupported = typeof window !== 'undefined' && 'speechSynthesis' in window;
+// Gemini TTS (server) is the primary voice; the browser's own voices are the fallback.
+export const speechSupported = typeof window !== 'undefined' && (browserTtsSupported || typeof Audio !== 'undefined');
 
 // Strips markdown syntax so it isn't read aloud literally ("asterisk asterisk bold asterisk asterisk").
 export function stripMarkdownForSpeech(text) {
@@ -82,14 +84,14 @@ function mergeShortForeignRuns(segments) {
 // utterances that still land near the limit.
 const MAX_CHUNK_LENGTH = 200;
 
-function splitLongSegment(text) {
-  if (text.length <= MAX_CHUNK_LENGTH) return [text];
+function splitLongSegment(text, maxLength = MAX_CHUNK_LENGTH) {
+  if (text.length <= maxLength) return [text];
 
   const sentences = text.split(/(?<=[.!?ฯ\n])\s+/);
   const chunks = [];
   let current = '';
   for (const sentence of sentences) {
-    if (current && (current + ' ' + sentence).length > MAX_CHUNK_LENGTH) {
+    if (current && (current + ' ' + sentence).length > maxLength) {
       chunks.push(current.trim());
       current = sentence;
     } else {
@@ -119,8 +121,11 @@ function stopKeepAlive() {
   }
 }
 
-export function speak(text, { onStart, onEnd } = {}) {
-  if (!speechSupported) return;
+function speakWithBrowser(text, { onStart, onEnd } = {}) {
+  if (!browserTtsSupported) {
+    onEnd?.();
+    return;
+  }
   stopKeepAlive();
   window.speechSynthesis.cancel();
 
@@ -158,8 +163,119 @@ export function speak(text, { onStart, onEnd } = {}) {
   });
 }
 
-export function stopSpeaking() {
-  if (!speechSupported) return;
+function stopBrowserSpeech() {
+  if (!browserTtsSupported) return;
   stopKeepAlive();
   window.speechSynthesis.cancel();
+}
+
+// ---------- Gemini TTS (primary) ----------
+
+let ttsConfig = { apiUrl: '', getToken: () => null };
+export function configureTts(config) {
+  ttsConfig = config;
+}
+
+// Gemini speaks Thai/English mixes natively, so no script-splitting is needed - only chunking,
+// so the first audio starts after one short request instead of the whole reply.
+const GEMINI_CHUNK_LENGTH = 300;
+const GEMINI_RETRY_AFTER_MS = 45000; // after a TTS failure (e.g. quota), use browser voices for a while
+
+const audioEl = typeof Audio !== 'undefined' ? new Audio() : null;
+let playId = 0;
+let geminiDisabledUntil = 0;
+let abortController = null;
+
+// Browsers only allow audio.play() after a user gesture; replies arrive asynchronously, so
+// the shared element is "unlocked" by the first tap/keypress anywhere on the page.
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+function unlockAudio() {
+  if (!audioEl) return;
+  audioEl.src = SILENT_WAV;
+  audioEl.play().catch(() => {});
+}
+if (typeof document !== 'undefined') {
+  document.addEventListener('pointerdown', unlockAudio, { once: true });
+  document.addEventListener('keydown', unlockAudio, { once: true });
+}
+
+async function fetchGeminiAudio(text, signal) {
+  const token = ttsConfig.getToken();
+  if (!token) throw new Error('not signed in');
+  const res = await fetch(`${ttsConfig.apiUrl}/tts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ text }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`tts ${res.status}`);
+  return URL.createObjectURL(await res.blob());
+}
+
+function playUrl(url) {
+  return new Promise((resolve, reject) => {
+    audioEl.onended = resolve;
+    audioEl.onerror = () => reject(new Error('audio playback failed'));
+    audioEl.src = url;
+    audioEl.play().catch(reject);
+  });
+}
+
+async function speakWithGemini(chunks, id, signal, { onStart, onEnd }) {
+  let i = 0;
+  let started = false;
+  try {
+    let next = fetchGeminiAudio(chunks[0], signal);
+    for (; i < chunks.length; i++) {
+      const url = await next;
+      if (id !== playId) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      // Fetch the next chunk while this one plays so there's no gap between them.
+      next = i + 1 < chunks.length ? fetchGeminiAudio(chunks[i + 1], signal) : null;
+      next?.catch(() => {});
+      if (!started) {
+        started = true;
+        onStart?.();
+      }
+      await playUrl(url);
+      URL.revokeObjectURL(url);
+      if (id !== playId) return;
+    }
+    onEnd?.();
+  } catch {
+    if (id !== playId) return;
+    geminiDisabledUntil = Date.now() + GEMINI_RETRY_AFTER_MS;
+    // Pick up where Gemini failed using the browser's own voice.
+    speakWithBrowser(chunks.slice(i).join(' '), { onStart: started ? undefined : onStart, onEnd });
+  }
+}
+
+export function speak(text, callbacks = {}) {
+  stopSpeaking();
+  const clean = stripMarkdownForSpeech(text);
+  if (!clean) {
+    callbacks.onEnd?.();
+    return;
+  }
+  if (!audioEl || Date.now() < geminiDisabledUntil || !ttsConfig.getToken()) {
+    speakWithBrowser(clean, callbacks);
+    return;
+  }
+  const id = ++playId;
+  abortController = new AbortController();
+  speakWithGemini(splitLongSegment(clean, GEMINI_CHUNK_LENGTH), id, abortController.signal, callbacks);
+}
+
+export function stopSpeaking() {
+  playId++;
+  abortController?.abort();
+  abortController = null;
+  if (audioEl) {
+    audioEl.onended = null;
+    audioEl.onerror = null;
+    audioEl.pause();
+  }
+  stopBrowserSpeech();
 }
