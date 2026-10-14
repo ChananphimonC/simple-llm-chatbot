@@ -278,7 +278,10 @@ const COMMANDS = [
   { type: 'camera-close', re: /(?<!เ)ปิดกล้อง|closecamera/ },
   { type: 'camera-back', re: /(เปิด|สลับ|ใช้|เปลี่ยน|open|switch).*(กล้องหลัง|backcamera|rearcamera)|^กล้องหลัง/ },
   { type: 'camera-front', re: /(เปิด|สลับ|ใช้|เปลี่ยน|open|switch).*(กล้องหน้า|กล้องเซลฟี่|frontcamera|selfie)|^กล้องหน้า/ },
-  { type: 'camera-open', re: /^(เปิดกล้อง|opencamera)$/ },
+  // Not anchored at the end ($) on purpose: natural Thai speech almost always adds a
+  // trailing particle ("เปิดกล้องนะ", "เปิดกล้องหน่อย"), and the old exact-match regex
+  // rejected every one of those, silently falling through to a plain chat message.
+  { type: 'camera-open', re: /^(เปิดกล้อง|opencamera)/ },
   { type: 'read', re: /อ่าน(ข้อความ|ป้าย|ตัวหนังสือ|เอกสาร|ฉลาก)|readthis|readthetext/ },
   { type: 'describe', re: /^(ถ่ายรูป|ถ่ายภาพ|อธิบาย(ภาพ|รูป)?)(หน่อย|ให้ฟัง|ที|ได้ไหม|ครับ|ค่ะ|คะ)*$|เห็นอะไร|ข้างหน้า(มี)?อะไร|ตรงหน้า(คือ|มี)อะไร|describe|whatdoyousee|takea(photo|picture)/ },
   { type: 'repeat', re: /พูดอีก(ครั้ง|ที)|อีกครั้ง|ว่าอีกที|repeat/ },
