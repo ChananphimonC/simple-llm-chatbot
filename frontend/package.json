@@ -11,6 +11,7 @@
     "dev:tunnel": "vite --mode tunnel"
   },
   "dependencies": {
+    "@google/genai": "^2.29.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0"

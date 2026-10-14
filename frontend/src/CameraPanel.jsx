@@ -54,15 +54,16 @@ const CameraPanel = forwardRef(function CameraPanel({ facing, onFlip, onClose, o
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [facing]);
 
-  const capture = () => {
+  // Photos use the defaults; the live voice stream passes a smaller edge/quality since it sends a frame every second.
+  const capture = ({ maxEdge = MAX_EDGE, quality = 0.85 } = {}) => {
     const video = videoRef.current;
     if (!video || !ready || !video.videoWidth) return null;
-    const scale = Math.min(1, MAX_EDGE / Math.max(video.videoWidth, video.videoHeight));
+    const scale = Math.min(1, maxEdge / Math.max(video.videoWidth, video.videoHeight));
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(video.videoWidth * scale);
     canvas.height = Math.round(video.videoHeight * scale);
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.85);
+    return canvas.toDataURL('image/jpeg', quality);
   };
 
   useImperativeHandle(ref, () => ({ capture }));

@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import wave
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -446,6 +447,132 @@ def stt(req: STTRequest, user: User = Depends(get_current_user)):
     except Exception:
         logger.exception("Unhandled error in /stt")
         raise HTTPException(status_code=502, detail="ถอดเสียงไม่สำเร็จ")
+
+
+# ---------- Gemini Live (real-time voice) ----------
+#
+# The browser talks to Gemini Live directly over a WebSocket (no hop through this server, which is
+# the biggest single latency win). To keep GOOGLE_API_KEY off the client we mint a short-lived,
+# single-use ephemeral token here, and lock the whole session config into it: the client cannot
+# change the system prompt, tools, voice or VAD settings, whatever it sends.
+
+LIVE_MODEL = os.getenv("LIVE_MODEL", "gemini-3.1-flash-live-preview")
+LIVE_VOICE = os.getenv("LIVE_VOICE", TTS_VOICE)
+# How long Gemini waits after you stop talking before it answers. Lower = snappier but cuts off
+# people who pause mid-sentence; Thai speakers pause a lot, so 500ms is the floor worth trying.
+LIVE_SILENCE_MS = int(os.getenv("LIVE_SILENCE_MS", "500"))
+# Reasoning before speaking is pure latency in a voice chat. Set empty to omit if the model rejects it.
+LIVE_THINKING_LEVEL = os.getenv("LIVE_THINKING_LEVEL", "MINIMAL").strip().upper()
+LIVE_SESSION_MINUTES = 30
+
+LIVE_INSTRUCTION = ACCESSIBILITY_INSTRUCTION + (
+    " นี่คือการสนทนาด้วยเสียงแบบเรียลไทม์ ตอบสั้น กระชับ เป็นธรรมชาติ ไม่เกิน 2-3 ประโยค "
+    "เว้นแต่ผู้ใช้ขอให้อธิบายละเอียด และผู้ใช้พูดแทรกได้ทุกเมื่อ "
+    "เมื่อผู้ใช้ขอเปิดหรือปิดกล้อง หรือสลับกล้องหน้า/หลัง ให้เรียกฟังก์ชัน set_camera ทันทีโดยไม่ต้องถามยืนยัน "
+    "เมื่อกล้องเปิดอยู่ คุณจะได้รับภาพล่าสุดจากกล้องประมาณวินาทีละหนึ่งภาพ ให้ใช้ภาพล่าสุดตอบคำถามเกี่ยวกับสิ่งที่อยู่ตรงหน้า "
+    "ถ้าผู้ใช้ถามว่าเห็นอะไรหรือให้อ่านข้อความแต่กล้องยังปิดอยู่ ให้เรียก set_camera เพื่อเปิดกล้องหลังก่อน แล้วจึงตอบ"
+)
+
+SET_CAMERA_TOOL = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="set_camera",
+            description="Open or close the device camera, or switch between the front and back camera. "
+            "While the camera is open the user's latest camera frame is streamed to you.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "open": types.Schema(type=types.Type.BOOLEAN, description="true to open/keep open, false to close"),
+                    "facing": types.Schema(
+                        type=types.Type.STRING,
+                        enum=["back", "front"],
+                        description="Which camera when opening. Default back.",
+                    ),
+                },
+                required=["open"],
+            ),
+        )
+    ]
+)
+
+
+def _live_connect_config() -> types.LiveConnectConfig:
+    cfg = types.LiveConnectConfig(
+        response_modalities=[types.Modality.AUDIO],
+        system_instruction=LIVE_INSTRUCTION,
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=LIVE_VOICE))
+        ),
+        # Transcripts are what get saved to the conversation and shown in the chat.
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                prefix_padding_ms=100,
+                silence_duration_ms=LIVE_SILENCE_MS,
+            )
+        ),
+        # Audio+video sessions are time-limited without this; sliding-window compression keeps them going.
+        context_window_compression=types.ContextWindowCompressionConfig(sliding_window=types.SlidingWindow()),
+        tools=[SET_CAMERA_TOOL],
+    )
+    if LIVE_THINKING_LEVEL in types.ThinkingLevel.__members__:
+        cfg.thinking_config = types.ThinkingConfig(thinking_level=types.ThinkingLevel[LIVE_THINKING_LEVEL])
+    return cfg
+
+
+@app.post("/live/token")
+def live_token(user: User = Depends(get_current_user)):
+    _rate_limit("live", user.id, limit=6)
+    now = datetime.now(timezone.utc)
+    try:
+        token = client.auth_tokens.create(
+            config=types.CreateAuthTokenConfig(
+                uses=1,
+                expire_time=now + timedelta(minutes=LIVE_SESSION_MINUTES),
+                new_session_expire_time=now + timedelta(minutes=1),
+                live_connect_constraints=types.LiveConnectConstraints(model=LIVE_MODEL, config=_live_connect_config()),
+                http_options=types.HttpOptions(
+                    api_version="v1alpha", retry_options=types.HttpRetryOptions(attempts=1)
+                ),
+            )
+        )
+    except ClientError as e:
+        if e.code == 429:
+            raise HTTPException(status_code=429, detail="โควต้า Gemini หมดชั่วคราว ลองใหม่ภายหลัง")
+        raise HTTPException(status_code=502, detail=f"Gemini token error: {e.message}")
+    except Exception:
+        logger.exception("Unhandled error in /live/token")
+        raise HTTPException(status_code=502, detail="ขอสิทธิ์เชื่อมต่อเสียงสดไม่สำเร็จ")
+    return {"token": token.name, "model": LIVE_MODEL}
+
+
+class TurnRequest(BaseModel):
+    user: str = ""
+    model: str = ""
+
+
+@app.post("/conversations/{conversation_id}/turns")
+def save_turn(
+    conversation_id: int,
+    req: TurnRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Persist one voice exchange (Live transcripts) so it shows up in history like a typed chat."""
+    convo = _get_owned_conversation(db, conversation_id, user)
+    said, replied = req.user.strip()[:4000], req.model.strip()[:8000]
+    if not said and not replied:
+        raise HTTPException(status_code=400, detail="ไม่มีข้อความให้บันทึก")
+    if said:
+        db.add(Message(conversation_id=convo.id, role="user", content=said))
+    if replied:
+        db.add(Message(conversation_id=convo.id, role="model", content=replied))
+    db.commit()
+    _invalidate_history_cache(convo.id)
+    return {"status": "ok"}
 
 
 @app.get("/")

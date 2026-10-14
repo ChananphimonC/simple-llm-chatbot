@@ -4,6 +4,7 @@ import { speak, stopSpeaking, speechSupported, configureTts } from './speech';
 import LoginModal from './LoginModal';
 import CameraPanel from './CameraPanel';
 import { createRecognizer, configureStt, parseCommand, recognitionSupported, HELP_TEXT } from './voice';
+import { startLiveSession, liveSupported } from './live';
 
 const TOKEN_KEY = 'lumina_token';
 const CONVERSATION_KEY = 'lumina_conversation_id';
@@ -477,6 +478,9 @@ function App() {
   const [sttError, setSttError] = useState(''); // visible even outside a11y mode, unlike the spoken-only `announce`
   const [cameraFacing, setCameraFacing] = useState(null); // null = camera closed
   const [liveStatus, setLiveStatus] = useState('');
+  const [liveState, setLiveState] = useState('off'); // Gemini Live session: off | connecting | live
+  const [liveSpeaking, setLiveSpeaking] = useState(false);
+  const [liveUnavailable, setLiveUnavailable] = useState(false); // after repeated failures, fall back to the classic STT/TTS path for a while
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
   const lastAutoSpokenRef = useRef(-1);
@@ -490,15 +494,29 @@ function App() {
   const sendRef = useRef(null);
   const transcriptRef = useRef(null);
   const messagesRef = useRef(messages);
+  const liveRef = useRef(null); // handle returned by startLiveSession
+  const liveStateRef = useRef('off');
+  const liveStoppedByUserRef = useRef(false); // a deliberate stop must not be undone by the accessibility auto-start
+  const liveFailuresRef = useRef(0);
+  const tokenRef = useRef(token);
+  const conversationIdRef = useRef(conversationId);
+  const cameraFacingRef = useRef(null);
+  const cameraWaitersRef = useRef([]); // resolved when CameraPanel reports ready/failed (Live's set_camera waits on this)
   a11yRef.current = a11y;
   voiceLangRef.current = voiceLang;
   messagesRef.current = messages;
+  liveStateRef.current = liveState;
+  tokenRef.current = token;
+  conversationIdRef.current = conversationId;
+  cameraFacingRef.current = cameraFacing;
 
   const apiUrl = import.meta.env.VITE_API_URL;
   configureTts({ apiUrl, getToken: () => localStorage.getItem(TOKEN_KEY) });
   configureStt({ apiUrl, getToken: () => localStorage.getItem(TOKEN_KEY) });
 
   const signOut = ({ reopenModal = false } = {}) => {
+    liveStoppedByUserRef.current = true;
+    liveRef.current?.stop();
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(CONVERSATION_KEY);
     setToken(null);
@@ -713,7 +731,8 @@ function App() {
     const lastIndex = messages.length - 1;
     if (lastIndex < 0) return;
     const msg = messages[lastIndex];
-    if (msg.role === 'user' || lastAutoSpokenRef.current === lastIndex) return;
+    // Live exchanges were already spoken by Gemini as they happened; replaying them through TTS would double up.
+    if (msg.role === 'user' || msg.live || lastAutoSpokenRef.current === lastIndex) return;
     lastAutoSpokenRef.current = lastIndex;
     if (voiceOn) playMessage(lastIndex, msg.text);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -731,12 +750,132 @@ function App() {
 
   // ---------- Voice input, camera & accessibility mode ----------
 
-  const handsFree = a11y && recognitionSupported && !micBlocked;
+  // Gemini Live is the primary voice path; the classic record -> /stt -> /chat -> /tts path below
+  // is the fallback for browsers without AudioWorklet and for when Live is failing.
+  const useLive = liveSupported && !liveUnavailable;
+  const handsFree = a11y && recognitionSupported && !micBlocked && !useLive;
 
-  // Status line for screen readers; in accessibility mode it is also spoken aloud.
+  // Status line for screen readers; in accessibility mode it is also spoken aloud
+  // (except during a Live session, where a second voice from the TTS path would talk over Gemini).
   const announce = (text) => {
     setLiveStatus(text);
-    if (a11yRef.current) playMessage('sys', text);
+    if (a11yRef.current && liveStateRef.current === 'off') playMessage('sys', text);
+  };
+
+  // ---------- Gemini Live session ----------
+
+  const sendLiveFrame = () => {
+    const dataUrl = cameraRef.current?.capture({ maxEdge: 768, quality: 0.6 });
+    if (dataUrl) liveRef.current?.sendVideoFrame(dataUrl.split(',')[1]);
+  };
+
+  const ensureCameraOpen = (facing) =>
+    new Promise((resolve) => {
+      if (cameraFacingRef.current === facing) return resolve(true);
+      const waiter = (ok) => {
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => {
+        cameraWaitersRef.current = cameraWaitersRef.current.filter((w) => w !== waiter);
+        resolve(false);
+      }, 8000);
+      cameraWaitersRef.current.push(waiter);
+      setCameraFacing(facing);
+    });
+
+  // The model calls this (set_camera) instead of us regex-matching phrases like "เปิดกล้อง".
+  const handleLiveTool = async (name, args) => {
+    if (name !== 'set_camera') return { ok: false, error: 'unknown_tool' };
+    if (args.open === false) {
+      if (cameraFacingRef.current) closeCamera();
+      return { ok: true, camera: 'closed' };
+    }
+    const front = args.facing === 'front';
+    if (!(await ensureCameraOpen(front ? 'user' : 'environment'))) return { ok: false, error: 'camera_unavailable' };
+    // Let auto-exposure settle, then get a frame to the model *before* answering the tool call so
+    // "what do you see?" is answered from this view and not an empty/black one.
+    await new Promise((r) => setTimeout(r, 500));
+    sendLiveFrame();
+    return { ok: true, camera: 'open', facing: front ? 'front' : 'back' };
+  };
+
+  // A finished voice exchange: show it in the chat and save it like any typed one.
+  const handleLiveTranscript = ({ user, model }) => {
+    const convoId = conversationIdRef.current;
+    const authToken = tokenRef.current;
+    if (!convoId || !authToken) return;
+    const isFirst = messagesRef.current.length === 0;
+    setMessages((prev) => [
+      ...prev,
+      ...(user ? [{ role: 'user', text: user, live: true }] : []),
+      ...(model ? [{ role: 'bot', text: model, live: true }] : []),
+    ]);
+    fetch(`${apiUrl}/conversations/${convoId}/turns`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify({ user, model }),
+    })
+      .then((res) => {
+        if (res.status === 401) signOut({ reopenModal: true });
+        else if (isFirst) loadConversations(authToken);
+      })
+      .catch(() => {});
+  };
+
+  const startLive = () => {
+    if (liveRef.current) return;
+    if (!tokenRef.current || !conversationIdRef.current) {
+      setShowLoginModal(true);
+      return;
+    }
+    stopListening();
+    stopSpeaking();
+    setSpeakingIndex(null);
+    setMicNote('');
+    liveStoppedByUserRef.current = false;
+    setLiveState('connecting');
+    let reachedLive = false;
+    const startedAt = Date.now();
+    const handle = startLiveSession({
+      apiUrl,
+      getToken: () => tokenRef.current,
+      onState: (state) => {
+        setLiveState(state);
+        if (state === 'live') {
+          reachedLive = true;
+          setLiveStatus('คุยสดอยู่ พูดได้เลย');
+        }
+      },
+      onSpeaking: setLiveSpeaking,
+      onTranscript: handleLiveTranscript,
+      onToolCall: handleLiveTool,
+      onClose: ({ error, userInitiated }) => {
+        if (liveRef.current === handle) liveRef.current = null;
+        setLiveState('off');
+        setLiveSpeaking(false);
+        if (userInitiated || !error) return;
+        // A session that was working and then dropped (idle timeout, network blip) is just restarted by the
+        // accessibility auto-start; one that dies right away twice, or was refused (quota), falls back.
+        const diedEarly = !reachedLive || Date.now() - startedAt < 5000;
+        liveFailuresRef.current = diedEarly ? liveFailuresRef.current + 1 : 0;
+        if (liveFailuresRef.current >= 2 || /โควต้า|ใช้งานถี่/.test(error)) {
+          liveFailuresRef.current = 0;
+          setMicNote(`เสียงสดใช้ไม่ได้ชั่วคราว (${error}) กำลังใช้โหมดเสียงปกติแทน`);
+          setLiveUnavailable(true);
+          setTimeout(() => setLiveUnavailable(false), 60000);
+        } else {
+          // Never fail silently: to the user a mic that just goes idle looks the same as "it can't hear me".
+          setMicNote(`เชื่อมต่อเสียงสดไม่สำเร็จ (${error})`);
+        }
+      },
+    });
+    liveRef.current = handle;
+  };
+
+  const stopLive = (byUser = true) => {
+    liveStoppedByUserRef.current = byUser;
+    liveRef.current?.stop();
   };
 
   const startListening = () => {
@@ -833,6 +972,12 @@ function App() {
       setMicBlocked(false);
       setMicNote('');
     }
+    if (useLive) {
+      setMicNote('');
+      if (liveRef.current) stopLive();
+      else startLive();
+      return;
+    }
     if (listening) finishListening();
     else startListening();
   };
@@ -853,12 +998,19 @@ function App() {
     setMicNote('');
     if (on) {
       setVoiceOn(true);
-      announce(
-        recognitionSupported
-          ? 'เปิดโหมดช่วยเหลือแล้ว ฉันจะฟังคำสั่งเสียงของคุณอัตโนมัติ พูดว่า ช่วยเหลือ เพื่อฟังคำสั่งทั้งหมด'
-          : 'เปิดโหมดช่วยเหลือแล้ว แต่เบราว์เซอร์นี้ไม่รองรับการสั่งงานด้วยเสียง กรุณาใช้ Chrome หรือ Safari'
-      );
+      liveStoppedByUserRef.current = false;
+      if (useLive) {
+        // The Live session starts itself (effect below) and plays a chime once it's listening.
+        setLiveStatus('เปิดโหมดช่วยเหลือแล้ว กำลังเชื่อมต่อเสียงสด');
+      } else {
+        announce(
+          recognitionSupported
+            ? 'เปิดโหมดช่วยเหลือแล้ว ฉันจะฟังคำสั่งเสียงของคุณอัตโนมัติ พูดว่า ช่วยเหลือ เพื่อฟังคำสั่งทั้งหมด'
+            : 'เปิดโหมดช่วยเหลือแล้ว แต่เบราว์เซอร์นี้ไม่รองรับการสั่งงานด้วยเสียง กรุณาใช้ Chrome หรือ Safari'
+        );
+      }
     } else {
+      stopLive();
       stopListening();
       stopSpeaking();
       setSpeakingIndex(null);
@@ -900,9 +1052,15 @@ function App() {
 
   // CameraPanel reports once the stream is live (or has failed).
   const handleCameraStatus = (status, ready) => {
+    // Wake any Live set_camera call that is waiting for the stream.
+    cameraWaitersRef.current.splice(0).forEach((resolveWaiter) => resolveWaiter(ready));
     if (!ready) {
       pendingCaptureRef.current = null;
       announce(status);
+      return;
+    }
+    if (liveStateRef.current !== 'off') {
+      setLiveStatus(status);
       return;
     }
     const pending = pendingCaptureRef.current;
@@ -965,6 +1123,31 @@ function App() {
     if (command) runCommand(command);
     else sendRef.current(text);
   };
+
+  // Accessibility mode with Live: connect on its own (and reconnect if the session drops), unless the user turned it off.
+  useEffect(() => {
+    if (!a11y || !useLive || !token || !conversationId || showLoginModal || historyLoading) return;
+    if (liveState !== 'off' || liveStoppedByUserRef.current) return;
+    const timer = setTimeout(startLive, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [a11y, useLive, token, conversationId, showLoginModal, historyLoading, liveState]);
+
+  // A Live session belongs to one conversation: switching chats ends it (accessibility mode starts a fresh one).
+  useEffect(() => {
+    liveRef.current?.stop();
+  }, [conversationId]);
+
+  // While the camera is open during a session, stream a small frame every second so "what's in front of me?" is
+  // answered from the current view with no capture round trip.
+  useEffect(() => {
+    if (liveState !== 'live' || !cameraFacing) return;
+    const timer = setInterval(sendLiveFrame, 1000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveState, cameraFacing]);
+
+  useEffect(() => () => liveRef.current?.stop(), []);
 
   // Hands-free loop: listen -> (command | send) -> speak the reply -> listen again.
   useEffect(() => {
@@ -1094,9 +1277,15 @@ function App() {
             <p className="text-label-sm text-on-surface-variant">
               {historyLoading
                 ? 'กำลังโหลดบทสนทนา...'
-                : listening
-                  ? 'กำลังฟัง...'
-                  : 'Powered by Gemini'}
+                : liveState === 'connecting'
+                  ? 'กำลังเชื่อมต่อเสียงสด...'
+                  : liveState === 'live'
+                    ? liveSpeaking
+                      ? 'กำลังพูด...'
+                      : 'คุยสดอยู่ · พูดได้เลย'
+                    : listening
+                      ? 'กำลังฟัง...'
+                      : 'Powered by Gemini'}
             </p>
           </div>
           <div className="ml-auto flex items-center gap-1">
@@ -1216,9 +1405,15 @@ function App() {
               {micNote} (กดปุ่มไมค์เพื่อลองใหม่)
             </p>
           ) : (
-            (a11y || listening) && (
+            (a11y || listening || liveState !== 'off') && (
               <p className="mb-2 text-center text-label-md text-primary" aria-hidden="true">
-                {listening
+                {liveState === 'connecting'
+                  ? 'กำลังเชื่อมต่อเสียงสด... (ถ้าเบราว์เซอร์ถามสิทธิ์ไมโครโฟน ให้กดอนุญาต)'
+                  : liveState === 'live'
+                    ? liveSpeaking
+                      ? 'กำลังพูด... (พูดแทรกได้เลย)'
+                      : 'คุยสดอยู่ พูดได้เลย (กดไมค์เพื่อหยุด)'
+                    : listening
                   ? micPhase === 'hearing'
                     ? 'ได้ยินเสียงแล้ว... พูดให้จบประโยคแล้วหยุดสักครู่'
                     : micPhase === 'starting'
@@ -1244,22 +1439,41 @@ function App() {
               placeholder="พิมพ์ข้อความ... (Enter เพื่อส่ง)"
               className="max-h-40 flex-1 resize-none bg-transparent py-2.5 text-body-md text-on-surface placeholder:text-on-surface-variant focus:outline-none"
             />
-            {recognitionSupported && (
+            {(recognitionSupported || useLive) && (
               <>
-                <button
-                  onClick={toggleVoiceLang}
-                  aria-label={`ภาษาที่ฟัง: ${voiceLang === 'th-TH' ? 'ไทย' : 'อังกฤษ'} กดเพื่อสลับ`}
-                  className="flex h-11 shrink-0 items-center justify-center rounded-full px-2 text-label-sm text-on-surface-variant transition hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-                >
-                  {voiceLang === 'th-TH' ? 'TH' : 'EN'}
-                </button>
+                {/* Live auto-detects the spoken language; the TH/EN switch only steers the classic recognizer. */}
+                {!useLive && (
+                  <button
+                    onClick={toggleVoiceLang}
+                    aria-label={`ภาษาที่ฟัง: ${voiceLang === 'th-TH' ? 'ไทย' : 'อังกฤษ'} กดเพื่อสลับ`}
+                    className="flex h-11 shrink-0 items-center justify-center rounded-full px-2 text-label-sm text-on-surface-variant transition hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                  >
+                    {voiceLang === 'th-TH' ? 'TH' : 'EN'}
+                  </button>
+                )}
                 <button
                   onClick={toggleMic}
-                  aria-label={listening ? 'หยุดฟัง' : 'พูดกับ AI'}
-                  aria-pressed={listening}
+                  aria-label={
+                    useLive
+                      ? liveState !== 'off'
+                        ? 'หยุดคุยสด'
+                        : 'คุยสดกับ AI'
+                      : listening
+                        ? 'หยุดฟัง'
+                        : 'พูดกับ AI'
+                  }
+                  aria-pressed={useLive ? liveState !== 'off' : listening}
                   className={`flex shrink-0 items-center justify-center rounded-full transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
                     a11y ? 'h-14 w-14' : 'h-11 w-11'
-                  } ${listening ? 'animate-pulse bg-error text-on-primary' : 'bg-black/5 text-on-surface hover:bg-black/10'}`}
+                  } ${
+                    liveState === 'live'
+                      ? `bg-error text-on-primary ${liveSpeaking ? '' : 'animate-pulse'}`
+                      : liveState === 'connecting'
+                        ? 'animate-pulse bg-primary/20 text-primary'
+                        : listening
+                          ? 'animate-pulse bg-error text-on-primary'
+                          : 'bg-black/5 text-on-surface hover:bg-black/10'
+                  }`}
                 >
                   <MicIcon />
                 </button>
