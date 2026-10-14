@@ -213,9 +213,11 @@ function createGeminiRecognizer({ lang, onAudioStart, onSpeechStart, onFinal, on
       }
       if (now - lastVoiceAt > SILENCE_END_MS || now - startedAt > MAX_UTTERANCE_MS) stop(true);
     };
+    finishRecording = () => stop(true);
   };
 
   let cancelRecording = null;
+  let finishRecording = null;
   return {
     start() {
       start();
@@ -225,6 +227,14 @@ function createGeminiRecognizer({ lang, onAudioStart, onSpeechStart, onFinal, on
       abortCtl?.abort();
       if (cancelRecording) cancelRecording();
       else if (!stream) finish(); // aborted before the mic opened; start() will see `cancelled`
+    },
+    // Tapping the mic again mid-utterance should mean "I'm done talking, send it" the
+    // way push-to-talk works - not silently discard everything already recorded. Safe
+    // to call before speech is even detected too: stop(true) only transcribes once
+    // MIN_SPEECH_MS has been recorded, so an early tap is effectively a no-op cancel.
+    finishNow() {
+      if (finishRecording) finishRecording();
+      else this.abort();
     },
   };
 }
@@ -265,6 +275,10 @@ function createBrowserRecognizer({ lang = 'th-TH', onAudioStart, onSpeechStart, 
     if (text) onFinal?.(text);
     onEnd?.();
   };
+  // Unlike abort(), the native stop() ends gracefully and still fires onresult/onend
+  // with whatever was heard so far - the browser-recognizer equivalent of "send what
+  // I've got" rather than discarding it.
+  rec.finishNow = () => rec.stop();
   return rec;
 }
 

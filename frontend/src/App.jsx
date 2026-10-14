@@ -810,12 +810,30 @@ function App() {
     }, 600);
   };
 
+  // Ends the current recording and sends whatever was captured, instead of discarding it
+  // like stopListening() does. The automatic silence detection needs a real pause to fire
+  // (SILENCE_END_MS) and can take a while in a noisy room, so tapping the mic again is the
+  // user's own "I'm done talking" signal and must not just throw the utterance away -
+  // that silently turned every impatient re-tap into a wasted attempt.
+  const finishListening = () => {
+    const rec = recognizerRef.current;
+    if (!rec) return;
+    rec.finishNow();
+    setTimeout(() => {
+      if (recognizerRef.current === rec) {
+        recognizerRef.current = null;
+        setListening(false);
+        setMicPhase('idle');
+      }
+    }, 600);
+  };
+
   const toggleMic = () => {
     if (micBlocked) {
       setMicBlocked(false);
       setMicNote('');
     }
-    if (listening) stopListening();
+    if (listening) finishListening();
     else startListening();
   };
 
